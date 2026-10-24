@@ -57,7 +57,8 @@ async function main() {
 	const PAGES = [
 		'/', '/about/', '/archive/', '/albums/', '/devices/', '/games/', '/skills/',
 		'/timeline/', '/anime/', '/compass/', '/tags/', '/categories/',
-		'/series/', '/rss.xml', '/atom.xml', '/sitemap-index.xml', '/robots.txt',
+		'/series/', '/posts/agent-writes-back/', '/rss.xml', '/atom.xml',
+		'/sitemap-index.xml', '/robots.txt',
 	];
 	for (const p of PAGES) {
 		const s = await go(p, 300);
@@ -119,6 +120,8 @@ async function main() {
 	chk('canonical 正确', art.canonical === BASE + '/posts/agent-website-notes/', art.canonical);
 	chk('Markdown 加粗正常（无字面星号）', art.hasPhrase && !art.literalStars && art.strongPhrase);
 	chk('文章页不发 live.json 请求', liveHits.length === 0, liveHits.length + ' 次');
+	const aiPostHtml = await (await fetch(BASE + '/posts/agent-writes-back/')).text();
+	chk('AI 专文归入「Agents」分类', aiPostHtml.includes('Agents'), '分类缺失');
 
 	console.log('\n[5] 公开阅读实验');
 	st = await go('/ai-reading/');
