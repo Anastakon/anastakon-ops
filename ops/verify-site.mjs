@@ -122,6 +122,9 @@ async function main() {
 	chk('文章页不发 live.json 请求', liveHits.length === 0, liveHits.length + ' 次');
 	const aiPostHtml = await (await fetch(BASE + '/posts/agent-writes-back/')).text();
 	chk('AI 专文归入「Agents」分类', aiPostHtml.includes('Agents'), '分类缺失');
+	const unlockedRes = await fetch(BASE + '/posts/journal-minecraft-essay/');
+	const unlockedHtml = await unlockedRes.text();
+	chk('Minecraft 文章已解锁', unlockedRes.status === 200 && unlockedHtml.includes('2013年') && !unlockedHtml.includes('输入密码'), 'HTTP ' + unlockedRes.status);
 
 	console.log('\n[5] 公开阅读实验');
 	st = await go('/ai-reading/');
