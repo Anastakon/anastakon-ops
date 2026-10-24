@@ -1,16 +1,9 @@
 // Shirone 站点回归检查（真浏览器跑，不是 curl）
-// 用法: SITE_URL=https://example.com node verify-site.mjs
+// 用法: node verify-site.mjs [baseUrl]      默认 https://anastakon.top
 // 退出码: 0 全过 / 1 有失败项 / 2 脚本自身异常
 import puppeteer from 'puppeteer-core';
 
-// 用法: SITE_URL=https://example.com node verify-site.mjs
-//      或者 node verify-site.mjs https://example.com
-const BASE = (process.argv[2] || process.env.SITE_URL || '').replace(/\/$/, '');
-
-if (!BASE) {
-	console.error('缺少站点地址。用法：\n  SITE_URL=https://example.com node verify-site.mjs\n  node verify-site.mjs https://example.com');
-	process.exit(2);
-}
+const BASE = (process.argv[2] || 'https://anastakon.top').replace(/\/$/, '');
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -127,7 +120,22 @@ async function main() {
 	chk('Markdown 加粗正常（无字面星号）', art.hasPhrase && !art.literalStars && art.strongPhrase);
 	chk('文章页不发 live.json 请求', liveHits.length === 0, liveHits.length + ' 次');
 
-	console.log('\n[5] 404 页');
+	console.log('\n[5] 公开阅读实验');
+	st = await go('/ai-reading/');
+	chk('实验页 HTTP 200', st === 200 || st === 304, 'HTTP ' + st);
+	const experiment = await evalPage(() => ({
+		h1: (document.querySelector('.experiment__title')?.textContent || '').trim(),
+		target: [...document.querySelectorAll('a')].some((a) => a.getAttribute('href') === '/posts/agent-website-notes/'),
+		question: document.body.innerText.includes('哪一处具体细节'),
+		mailbox: [...document.querySelectorAll('a')].some((a) => a.getAttribute('href') === '/ai-note'),
+	}));
+	chk('实验页标题与统一问题存在', experiment.h1 === '同文同题：AI 阅读实验' && experiment.question, experiment.h1 || '(空)');
+	chk('实验页链接目标文章与信箱', experiment.target && experiment.mailbox);
+	const sitemapForExperiment = await (await fetch(BASE + '/sitemap-0.xml')).text();
+	chk('实验页进入 sitemap', sitemapForExperiment.includes('/ai-reading/'));
+	chk('llms 页链接实验', (await (await fetch(BASE + '/llms/')).text()).includes('/ai-reading/'));
+
+	console.log('\n[6] 404 页');
 	st = await go('/__verify_not_found_a__', 2600);
 	// nf.js 故意延迟 ~900ms 才填充标题（setTimeout(run, 900)），networkidle2 之后立刻读会拿到空值 → 显式轮询
 	for (let i = 0; i < 25; i++) {
@@ -171,7 +179,7 @@ async function main() {
 	chk('404 按钮文案不为空', emptyBtn === 0, emptyBtn + ' 次为空');
 	chk('6 次出现多种文案', new Set(seen).size >= 4, new Set(seen).size + ' 种');
 
-	console.log('\n[6] 全局');
+	console.log('\n[7] 全局');
 	chk('无 JS 报错', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 	chk('无资源加载失败', badRes.length === 0, badRes.slice(0, 3).join(' | '));
 
@@ -186,7 +194,7 @@ async function main() {
 	const live = await (await fetch(BASE + '/live.json')).json();
 	chk('live.json 可解析且字段完整', live && Object.keys(live).length >= 3, Object.keys(live).join(','));
 
-	console.log('\n[7] 域名与跳转');
+	console.log('\n[8] 域名与跳转');
 	const u = new URL(BASE);
 	if (u.protocol !== 'https:') {
 		console.log('  skip  BASE 不是 https，跳过域名检查');
@@ -228,7 +236,7 @@ async function main() {
 		chk('canonical 指向正式域名且为 https', can === `https://${apex}/`, can || '(无)');
 	}
 
-	// [8] 站点描述与结构化数据：这两项曾被主题占位值坑过，锁在这里防回退
+	// [9] 站点描述与结构化数据：这两项曾被主题占位值坑过，锁在这里防回退
 	{
 		const rss = await (await fetch(BASE + '/rss.xml')).text();
 		const rssDesc = (rss.match(/<description>([^<]*)<\/description>/) || [])[1] || '';
@@ -255,7 +263,7 @@ async function main() {
 		chk('内页有 BreadcrumbList', aboutLd.some((j) => j['@type'] === 'BreadcrumbList'), `共 ${aboutLd.length} 条`);
 	}
 
-	console.log('\n[9] 页面抓取限速（只限文档，不限资源）');
+	console.log('\n[10] 页面抓取限速（只限文档，不限资源）');
 	// 目的：允许慢爬，不允许「几秒抓完整站」。用页面内 fetch 连发模拟采集器，不是 curl。
 	const burst = await page.evaluate(async () => {
 		const codes = {};
@@ -291,7 +299,7 @@ async function main() {
 	const recovered = await page.evaluate(async () => (await fetch('/?recover=' + Date.now(), { cache: 'no-store' })).status);
 	chk('冷却 12s 后恢复访问', recovered === 200, 'HTTP ' + recovered);
 
-	console.log('\n[10] AI 留言板（收信页 + 投递通道）');
+	console.log('\n[11] AI 留言板（收信页 + 投递通道）');
 	// 这条链路横跨 nginx / 独立 node 服务 / 静态页三处，任何一处丢了都不会有别的检查发现
 	await sleep(1500);
 	const gbRes = await page.goto(BASE + '/ai-notes/', { waitUntil: 'networkidle2', timeout: 60000 });
