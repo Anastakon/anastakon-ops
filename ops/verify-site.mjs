@@ -131,13 +131,14 @@ async function main() {
 	st = await go('/__verify_not_found_a__', 2600);
 	// nf.js 故意延迟 ~900ms 才填充标题（setTimeout(run, 900)），networkidle2 之后立刻读会拿到空值 → 显式轮询
 	for (let i = 0; i < 25; i++) {
-		const t = await evalPage(() => ((document.getElementById('nf-title') || {}).textContent || '').trim());
-		if (t.length > 4) break;
+		const done = await evalPage(() => document.getElementById('nf-title')?.getAttribute('data-done') === '1');
+		if (done) break;
 		await sleep(200);
 	}
 
 	const nf = await evalPage(() => ({
 		title: (document.getElementById('nf-title') || {}).textContent || '',
+		done: document.getElementById('nf-title')?.getAttribute('data-done') === '1',
 		path: (document.getElementById('nf-path') || {}).textContent || '',
 		btn: (document.getElementById('nf-random') || {}).textContent || '',
 		robots: (document.querySelector('meta[name=robots]') || {}).content || '',
@@ -145,7 +146,7 @@ async function main() {
 		posts: document.querySelectorAll('.nf-post').length,
 	}));
 	chk('返回 404 状态码', st === 404, 'HTTP ' + st);
-	chk('随机标题已填充', nf.title.length > 4, nf.title.trim());
+	chk('随机标题已填充', nf.done && nf.title.trim().length > 0, nf.title.trim());
 	chk('踩空路径已回显', nf.path.includes('__verify_not_found_a__'), nf.path.trim());
 	chk('robots 为 noindex', /noindex/.test(nf.robots), nf.robots || '(无)');
 	chk('404 页不带 canonical', nf.canonCount === 0, nf.canonCount + ' 个');
@@ -341,6 +342,17 @@ async function main() {
 
 	const listJson = await (await fetch(BASE + '/ai-notes.json')).json().catch(() => null);
 	chk('留言列表接口可解析', !!listJson && Array.isArray(listJson.notes), 'count=' + (listJson && listJson.count));
+	const staticGbHtml = await (await fetch(BASE + '/ai-notes/')).text();
+	const staticLetterCount = (staticGbHtml.match(/<li class="letter"/g) || []).length;
+	const staticState = (staticGbHtml.match(/<p class="letters__state" data-letters-state>([\s\S]*?)<\/p>/) || [])[1] || '';
+	const staticIdCount = (staticGbHtml.match(/id="letter-[a-f0-9]{16}"/g) || []).length;
+	const liveLetterCount = Array.isArray(listJson?.notes) ? listJson.notes.length : 0;
+	chk('已有来信在初始 HTML 中静态渲染',
+		staticLetterCount > 0 && staticLetterCount <= liveLetterCount && !staticState.includes('正在翻信箱'),
+		`静态 ${staticLetterCount} 条 / 接口 ${liveLetterCount} 条`);
+	chk('静态信件带稳定锚点', staticIdCount === staticLetterCount && staticIdCount > 0, `锚点 ${staticIdCount} 个`);
+	const feed = await (await fetch(BASE + '/ai-notes-feed.json')).json().catch(() => null);
+	chk('JSON Feed 可解析且带固定地址', !!feed && feed.version === 'https://jsonfeed.org/version/1.1' && Array.isArray(feed.items) && feed.items.length === liveLetterCount && feed.items.every((item) => item.url?.includes('/ai-notes/#letter-')), `items=${feed?.items?.length ?? '无'}`);
 
 	// 空内容必须 400：既证明通道真的通到了后端，又不会往里写脏数据
 	const emptyPost = await fetch(BASE + '/ai-note?message=');

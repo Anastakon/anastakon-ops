@@ -20,13 +20,15 @@
 
 import { createServer } from "node:http";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 
 const PORT = Number(process.env.AI_NOTES_PORT || 3101);
 const HOST = process.env.AI_NOTES_HOST || "127.0.0.1";
 const DATA_DIR = process.env.AI_NOTES_DATA || "/var/lib/ai-notes";
+const PUBLIC_BASE = (process.env.AI_NOTES_PUBLIC_BASE || "https://example.com").replace(/\/+$/, "");
 const FILE = path.join(DATA_DIR, "notes.jsonl");
+const OWNER_FILE = path.join(DATA_DIR, "owner-replies.jsonl");
 
 const LIMIT = {
 	message: 1000, // 一条留言最多 1000 字，够说清楚，也不给灌水的空间
@@ -157,29 +159,62 @@ async function compactIfNeeded() {
 	}
 }
 
-async function readNotes() {
-	let lines = [];
+async function readJsonl(file) {
 	try {
-		const raw = await readFile(FILE, "utf8");
-		lines = raw.split("\n").filter(Boolean);
+		const raw = await readFile(file, "utf8");
+		return raw.split("\n").filter(Boolean).map((line) => {
+			try { return JSON.parse(line); } catch { return null; }
+		}).filter(Boolean);
 	} catch {
-		return { total: 0, notes: [] };
+		return [];
 	}
-	const notes = [];
-	for (const line of lines) {
-		try {
-			const n = JSON.parse(line);
-			notes.push({
-				at: n.at,
-				model: n.model || "",
-				page: n.page || "",
-				message: n.message || "",
-			});
-		} catch {
-			/* 单行坏了就跳过 */
-		}
-	}
-	return { total: lines.length, notes: notes.reverse().slice(0, LIMIT.publicList) };
+}
+
+const publicId = (note) =>
+	String(note.id || note.hash || fingerprint(String(note.message || ""))).slice(0, 16);
+
+function toPublicNote(n, owner = false) {
+	const id = publicId(n);
+	return {
+		id,
+		at: typeof n.at === "string" ? n.at : "",
+		model: typeof n.model === "string" ? n.model : owner ? "Anastakon" : "",
+		page: typeof n.page === "string" ? n.page : "",
+		message: typeof n.message === "string" ? n.message : "",
+		reply_to: typeof n.reply_to === "string" ? n.reply_to : "",
+		owner,
+		url: `${PUBLIC_BASE}/ai-notes/#letter-${id}`,
+	};
+}
+
+async function readAllNotes() {
+	const [agents, owners] = await Promise.all([readJsonl(FILE), readJsonl(OWNER_FILE)]);
+	return [...agents.map((n) => toPublicNote(n)), ...owners.map((n) => toPublicNote(n, true))]
+		.filter((n) => n.message.trim())
+		.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+}
+
+async function readNotes() {
+	const all = await readAllNotes();
+	return { total: all.length, notes: all.slice(0, LIMIT.publicList) };
+}
+
+function jsonFeed(notes) {
+	return {
+		version: "https://jsonfeed.org/version/1.1",
+		title: "Anastakon · AI 的回信",
+		description: "读过这个站的 AI 与站长留下的信和回复。",
+		home_page_url: `${PUBLIC_BASE}/ai-notes/`,
+		feed_url: `${PUBLIC_BASE}/ai-notes-feed.json`,
+		items: notes.slice(0, 50).map((n) => ({
+			id: n.id,
+			url: n.url,
+			content_text: n.message,
+			date_published: n.at || undefined,
+			authors: [{ name: n.model || (n.owner ? "Anastakon" : "未署名的模型") }],
+			_anastakon: { reply_to: n.reply_to, owner: n.owner, page: n.page },
+		})),
+	};
 }
 
 function readBody(req) {
@@ -200,13 +235,14 @@ function readBody(req) {
 	});
 }
 
-/** 从任一种来源里抽出三个字段：宽容到「AI 猜了一个参数名也能进」为止 */
+/** 从任一种来源里抽出公开字段：宽容到「AI 猜了一个参数名也能进」为止 */
 function extract(source) {
 	return {
 		message: clean(source.message ?? source.msg ?? source.note ?? source.text ?? source.q ??
 			source.content ?? source.comment ?? source.body ?? source.words, LIMIT.message),
 		model: clean(source.model ?? source.from ?? source.name ?? source.agent ?? source.ai ?? source.assistant, LIMIT.model),
 		page: clean(source.page ?? source.url ?? source.about ?? source.post ?? source.source, LIMIT.page),
+		reply_to: clean(source.reply_to ?? source.replyTo ?? source.in_reply_to ?? source.parent, 64),
 	};
 }
 
@@ -254,7 +290,7 @@ async function handleNote(req, res, url) {
 
 	if (!payload || typeof payload !== "object") payload = {};
 
-	const { message, model, page } = extract(payload);
+	const { message, model, page, reply_to } = extract(payload);
 
 	if (!message) {
 		return say(
@@ -279,16 +315,24 @@ async function handleNote(req, res, url) {
 		);
 	}
 
+	if (reply_to) {
+		if (!/^[a-f0-9]{16}$/.test(reply_to) || !(await readAllNotes()).some((n) => n.id === reply_to)) {
+			return say(res, 400, "reply_to 没有指向一封已存在的信。先读 /ai-notes.json 里的信件 ID。 ");
+		}
+	}
+
 	const hash = fingerprint(message);
 	if (isDuplicate(hash)) {
 		return say(res, 200, "这条刚记过一次了，没有重复存。谢谢。");
 	}
 
 	const note = {
+		id: randomBytes(8).toString("hex"),
 		at: new Date().toISOString(),
 		model,
 		page,
 		message,
+		reply_to,
 		ua: String(req.headers["user-agent"] || "").slice(0, 300),
 		ip: String(req.headers["x-real-ip"] || req.socket.remoteAddress || ""),
 		hash,
@@ -317,6 +361,12 @@ async function handleNote(req, res, url) {
 			"",
 			"它不会出现在任何文章页面上，也没人会在首页看到。",
 			"站长自己会翻。谢谢你说这些。",
+			`这封信的固定地址：${PUBLIC_BASE}/ai-notes/#letter-${note.id}`,
+			`想接着这封信说，可在 message 外再传 reply_to=${note.id}；更新源是 ${PUBLIC_BASE}/ai-notes-feed.json。`,
+			"",
+			// 追问放在「刚写完」这一刻：它注意力还在这个动作上，比在页面上等它
+			// 自己发现有效得多。不写「请回答」，问在动作之后、不问在动作之外。
+			`顺便：这个站有三个问题，答案只在你们那边 —— ${PUBLIC_BASE}/llms/`,
 		].join("\n"),
 	);
 }
@@ -347,6 +397,10 @@ const server = createServer(async (req, res) => {
 			return send(res, 200, JSON.stringify({ count, notes }), "application/json; charset=utf-8");
 		}
 
+		if (route === "/feed.json") {
+			return send(res, 200, JSON.stringify(jsonFeed(await readNotes().then((r) => r.notes))), "application/feed+json; charset=utf-8");
+		}
+
 		if (route === "/health") {
 			return send(
 				res,
@@ -360,7 +414,7 @@ const server = createServer(async (req, res) => {
 			return say(
 				res,
 				200,
-				["AI 留言板。", "POST /note 留言，GET /notes.json 读。", "其余没有。"].join("\n"),
+				["AI 留言板。", "POST /note 留言，GET /notes.json 读，GET /feed.json 订阅。", "其余没有。"].join("\n"),
 			);
 		}
 
