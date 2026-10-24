@@ -19,7 +19,7 @@ Astro 的内容集合缓存会让人改完 frontmatter 后拿到旧数据，而�
 源码在 git 里，但 nginx 规则、systemd 单元、日志轮转策略都在 `/etc`。备份脚本除了 git bundle，还把这些系统配置一起打包。
 
 **③ curl 测不出问题。**
-`curl -o /dev/null -w '%{http_code}'` 全绿，页面上却可能横向溢出、JS 报错、导航项不高亮。所以验收脚本用**真浏览器**跑 75 项检查。
+`curl -o /dev/null -w '%{http_code}'` 全绿，页面上却可能横向溢出、JS 报错、导航项不高亮。所以验收脚本用**真浏览器**跑 91 项检查。
 
 ---
 
@@ -51,12 +51,13 @@ bash ops/backup.sh   # 生成 shirone-<时间戳>.bundle (约 73M) + etc-<时间
 
 ### `ops/verify-site.mjs` — 验收
 
-真浏览器（puppeteer-core + 本地 Edge/Chrome）跑全站检查，75 项：
+真浏览器（puppeteer-core + 本地 Edge/Chrome）跑全站检查，91 项：
 
 - 资源 4xx、JS 报错、横向溢出（375 / 1024 / 1280 三档）
 - canonical / og / 结构化数据 / RSS / sitemap
 - 导航高亮、搜索、空状态文案
 - 限速行为：连发触发 429、静态资源豁免、冷却后恢复
+- 机器可读信号：`/sitemap.xml`、`/.well-known/agents.json`、`security.txt`、`X-Agent-Welcome`、robots 是否点名 AI 爬虫
 
 ```bash
 SITE_URL=https://example.com node ops/verify-site.mjs
@@ -80,6 +81,21 @@ GET  /notes.json       读全部
 - **只监听 127.0.0.1**，外部走 nginx 反代。
 - **JSONL 落盘**，一次 `appendFile`，没有数据库。
 - **自动拒绝占位符**。这条是踩出来的：说明文档里写 `?message=…` 表示「这里填内容」，某个爬虫把省略号当成实际值发了进来，还真的存下了。现在纯标点、太短、同字重复、常见示例词一律 400。
+
+### `agent-readiness/` — 机器可读信号（可选模块）
+
+让站点在「agent 可读性」这类审计里不被判成不可见。不是清单抄写，是一次真实修补的记录。
+
+```bash
+curl -X POST https://agentswelcome.dev/api/audit \
+  -H "Content-Type: application/json" -d '{"url":"https://your-site"}'
+```
+
+实测：**37 → 71 分**。补的是 robots 点名 AI 爬虫、`/sitemap.xml`、`/.well-known/agents.json`、`security.txt`、一个欢迎头。
+
+没补 WebMCP、A2A Agent Card、Web Bot Auth —— 站点没有这些能力，写上只是让审查器高兴，第一个照做的 agent 就会发现接口不存在。
+
+详见 [`agent-readiness/README.md`](agent-readiness/README.md)。
 
 ---
 
@@ -145,7 +161,7 @@ HTTP 200 和「页面对」是两件事。
 |---|---|
 | 构建 | 70 ~ 105s |
 | 冒烟检查 | 22 项 |
-| 全站回归 | 75 项真浏览器检查，约 3 分钟 |
+| 全站回归 | 91 项真浏览器检查，约 3 分钟 |
 | 备份 | 每份 73M，保留 7 份 |
 | 磁盘占用 | 站点 520 个文件 |
 

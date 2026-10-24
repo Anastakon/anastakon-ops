@@ -1,0 +1,6 @@
+Contact: https://github.com/Anastakon/anastakon-ops/issues
+Contact: https://anastakon.top/about/
+Expires: 2027-10-24T00:00:00.000Z
+Preferred-Languages: zh, en
+Canonical: https://anastakon.top/.well-known/security.txt
+Policy: https://anastakon.top/llms/
