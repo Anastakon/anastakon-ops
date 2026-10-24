@@ -1,0 +1,11 @@
+# 统一 LF 行尾。
+# shell 脚本带 CRLF 到 Linux 上会直接报 bad interpreter: /bin/bash^M —— 这个坑很常见。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
+*.zip binary

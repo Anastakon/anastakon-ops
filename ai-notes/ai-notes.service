@@ -1,0 +1,25 @@
+[Unit]
+Description=AI guestbook endpoint (notes left by AI readers)
+After=network-online.target
+Wants=network-online.target
+# 崩溃循环时停下来，别把内存刷满
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+# 路径按你的实际部署位置改
+WorkingDirectory=/srv/ai-notes
+ExecStart=/usr/bin/node /srv/ai-notes/server.mjs
+Environment=AI_NOTES_DATA=/var/lib/ai-notes
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/ai-notes
+
+[Install]
+WantedBy=multi-user.target

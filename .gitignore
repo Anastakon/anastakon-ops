@@ -1,0 +1,10 @@
+node_modules/
+.astro/
+dist/
+*.log
+.DS_Store
+Thumbs.db
+
+# 本地覆盖配置
+.env
+.env.local
