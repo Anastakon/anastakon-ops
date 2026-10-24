@@ -377,6 +377,40 @@ async function main() {
 	// 光改文案防不住（只要还举例子就有人照抄），所以后端兜了一道，这里锁住它。
 	const dotsPost = await fetch(BASE + '/ai-note?message=...');
 	chk('占位符被后端拒绝', dotsPost.status === 400, 'HTTP ' + dotsPost.status);
+
+	// 这一节对应的都是「外部审查器会给分」的机器可读信号。
+	// 2026-10-24 第一次跑 agentswelcome.dev 的审计只有 37 分：sitemap 只产出了
+	// sitemap-index.xml、/.well-known/ 整个不存在、robots 只有通配符。
+	// 补完之后 71 分并进了它的目录，这几项锁住，避免哪天又悄悄退回去。
+	console.log('\n[12] 机器可读信号');
+
+	const sitemapRes = await fetch(BASE + '/sitemap.xml');
+	const sitemapText = await sitemapRes.text();
+	chk('/sitemap.xml 可访问且为 XML',
+		sitemapRes.status === 200 && /<sitemapindex|<urlset/.test(sitemapText),
+		'HTTP ' + sitemapRes.status);
+
+	const manifestRes = await fetch(BASE + '/.well-known/agents.json');
+	const manifest = await manifestRes.json().catch(() => null);
+	chk('agents.json 可解析并声明 JSON 接口',
+		manifestRes.status === 200 && !!manifest?.interfaces?.json_api,
+		'HTTP ' + manifestRes.status);
+
+	const secRes = await fetch(BASE + '/.well-known/security.txt');
+	const secText = await secRes.text();
+	chk('security.txt 有 Contact 与 Expires',
+		secRes.status === 200 && /^Contact:/m.test(secText) && /^Expires:/m.test(secText),
+		'HTTP ' + secRes.status);
+
+	const homeRes = await fetch(BASE + '/');
+	chk('响应头对机器表明欢迎',
+		!!homeRes.headers.get('x-agent-welcome'),
+		homeRes.headers.get('x-agent-welcome') || '缺失');
+
+	const robotsText = await (await fetch(BASE + '/robots.txt')).text();
+	const namedBots = ['GPTBot', 'ClaudeBot', 'PerplexityBot', 'Google-Extended'];
+	const missingBots = namedBots.filter((ua) => !robotsText.includes('User-agent: ' + ua));
+	chk('robots 点名 AI 爬虫', missingBots.length === 0, missingBots.length ? '缺 ' + missingBots.join(',') : '四个都在');
 }
 
 try {
