@@ -52,3 +52,20 @@ location ~ /\.(?!well-known/) {
     access_log off;
     return 444;
 }
+
+# 3) 结构化 API 索引
+# 给 agent 目录（Not Human Search 等）看的 /api/v1。站点一般只有一个写入口，
+# 不值得为此再跑一个服务：索引就是一份静态 JSON，放 public/api/v1.json，
+# 再用两条 exact match 指向它。
+location = /api/v1 {
+    default_type application/json;
+    try_files /api/v1.json =404;
+}
+location = /api/v1/ {
+    default_type application/json;
+    try_files /api/v1.json =404;
+}
+location = /openapi.yaml {
+    default_type application/yaml;
+    try_files /openapi.yaml =404;
+}

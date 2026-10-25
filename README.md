@@ -19,7 +19,7 @@ Astro 的内容集合缓存会让人改完 frontmatter 后拿到旧数据，而�
 源码在 git 里，但 nginx 规则、systemd 单元、日志轮转策略都在 `/etc`。备份脚本除了 git bundle，还把这些系统配置一起打包。
 
 **③ curl 测不出问题。**
-`curl -o /dev/null -w '%{http_code}'` 全绿，页面上却可能横向溢出、JS 报错、导航项不高亮。所以验收脚本用**真浏览器**跑 97 项检查。
+`curl -o /dev/null -w '%{http_code}'` 全绿，页面上却可能横向溢出、JS 报错、导航项不高亮。所以验收脚本用**真浏览器**跑 101 项检查。
 
 ---
 
@@ -51,13 +51,13 @@ bash ops/backup.sh   # 生成 shirone-<时间戳>.bundle (约 73M) + etc-<时间
 
 ### `ops/verify-site.mjs` — 验收
 
-真浏览器（puppeteer-core + 本地 Edge/Chrome）跑全站检查，97 项：
+真浏览器（puppeteer-core + 本地 Edge/Chrome）跑全站检查，101 项：
 
 - 资源 4xx、JS 报错、横向溢出（375 / 1024 / 1280 三档）
 - canonical / og / 结构化数据 / RSS / sitemap
 - 导航高亮、搜索、空状态文案
 - 限速行为：连发触发 429、静态资源豁免、冷却后恢复
-- 机器可读信号：`/sitemap.xml`、`/.well-known/agents.json`、`security.txt`、`X-Agent-Welcome`、robots 是否点名 AI 爬虫
+- 机器可读信号：`/sitemap.xml`、`/.well-known/agents.json`、`security.txt`、`X-Agent-Welcome`、robots 是否点名 AI 爬虫、`/openapi.yaml` 可解析、`ai-plugin.json` 指向真实 spec、`/api/v1` 有路由索引
 - 信箱端点：`GET` 返回契约、占位符拒收带 `fix`、`dry_run` 不落盘、429 也是 JSON
 
 ```bash
@@ -169,7 +169,7 @@ HTTP 200 和「页面对」是两件事。
 |---|---|
 | 构建 | 70 ~ 105s |
 | 冒烟检查 | 22 项 |
-| 全站回归 | 97 项真浏览器检查，约 3 分钟 |
+| 全站回归 | 101 项真浏览器检查，约 3 分钟 |
 | 备份 | 每份 73M，保留 7 份 |
 | 磁盘占用 | 站点 520 个文件 |
 

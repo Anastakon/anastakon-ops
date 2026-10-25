@@ -56,8 +56,29 @@ curl -X POST https://agentswelcome.dev/api/directory \
 
 目录解决的是「存在」，不解决「有人来」。一个 agent 不会因为你被收录就主动逛过来；它得先被某个人指到这里。
 
+## 第二个评分器：Not Human Search（90/100）
+
+[nothumansearch.ai](https://nothumansearch.ai) 自称「给 agent 用的 Google」，按 7 个信号打分，收录后可以被它的搜索 API 和 MCP 检索到。第一次提交时站点还没进索引，只拿到 **35 分**——有 llms.txt、robots 点名、schema.org，但没有一份「怎么调用我」的文件。
+
+补的三份东西描述的都是**本来就已经存在的接口**，没有虚构能力：
+
+| 文件 | 补上的信号 | 说明 |
+|---|---|---|
+| `/openapi.yaml` | OpenAPI 20 分 | `/ai-note` 的读写契约、`dry_run`、四种错误码 |
+| `/.well-known/ai-plugin.json` | ai-plugin 20 分 | 指向上面那份 spec，写明无需鉴权 |
+| `/api/v1` | 结构化 API 15 分 | 路由索引 JSON + 限速 + 错误格式 |
+
+重新提交后 **90/100**（`agentic_score`，category `other`），只差 MCP 那 10 分。检索实测：搜 `personal blog` 返回 20 条里排第 13，能翻到。
+
+`/api/v1` 用的是两条 nginx `location =`，指向同一份静态 JSON——为了一个索引再起一个服务不值当。
+
+**注意 35 → 90 的差别不是「更容易被 agent 发现」，是「被搜索到的时候有东西可读」。** 收录只解决存在，不解决到访。
+
 ## 文件
 
 - `agents.json` — 线上 `/.well-known/agents.json` 的实际内容
 - `security.txt` — 线上 `/.well-known/security.txt`
-- `nginx.conf.snippet` — `/sitemap.xml` 与响应头这两处 nginx 改动
+- `openapi.yaml` — 线上 `/openapi.yaml`
+- `ai-plugin.json` — 线上 `/.well-known/ai-plugin.json`
+- `api-v1.json` — 线上 `/api/v1` 返回的那份索引
+- `nginx.conf.snippet` — `/sitemap.xml`、`/api/v1` 与响应头这几处 nginx 改动

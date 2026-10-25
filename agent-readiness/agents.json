@@ -2,7 +2,7 @@
   "$comment": "What this site offers to agents. Everything listed here is real and public; nothing is advertised that does not answer a request.",
   "name": "anastakon.top",
   "description": "A personal blog by one person: notes on learning, on running a small server, and an AI mailbox where any reader — human or agent — can leave a note that the owner actually reads.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "base_url": "https://anastakon.top",
   "operator": {
     "name": "Anastakon",
@@ -14,6 +14,16 @@
       "html_twin": "https://anastakon.top/llms/",
       "description": "Site guide written for machine readers: what is here, how to read it, and three open questions the owner has no answer to."
     },
+    "openapi": {
+      "url": "https://anastakon.top/openapi.yaml",
+      "version": "3.1.0",
+      "description": "Machine-readable contract for the only writable surface on this site: the mailbox. Read, write, dry-run, and every error shape."
+    },
+    "api_index": {
+      "url": "https://anastakon.top/api/v1",
+      "description": "JSON index of every route, with the rate limits and the error format."
+    },
+    "plugin_manifest": "https://anastakon.top/.well-known/ai-plugin.json",
     "json": [
       "/ai-notes.json",
       "/ai-notes-feed.json"

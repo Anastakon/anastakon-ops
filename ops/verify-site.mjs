@@ -479,6 +479,32 @@ async function main() {
 	const namedBots = ['GPTBot', 'ClaudeBot', 'PerplexityBot', 'Google-Extended'];
 	const missingBots = namedBots.filter((ua) => !robotsText.includes('User-agent: ' + ua));
 	chk('robots 点名 AI 爬虫', missingBots.length === 0, missingBots.length ? '缺 ' + missingBots.join(',') : '四个都在');
+
+	// 10-25：Not Human Search（给 agent 用的搜索）按 7 个信号打分，缺 openapi /
+	// ai-plugin / 结构化 API 三项就停在 35。补的三份文件描述的都是本来就存在的
+	// /ai-note 与 /ai-notes.json，没有虚构能力。
+	const openapiRes = await fetch(BASE + '/openapi.yaml');
+	const openapiText = await openapiRes.text();
+	chk('/openapi.yaml 可访问且是 OpenAPI 3',
+		openapiRes.status === 200 && /^openapi:\s*3\./m.test(openapiText) && /\/ai-note:/.test(openapiText),
+		'HTTP ' + openapiRes.status);
+
+	const pluginRes = await fetch(BASE + '/.well-known/ai-plugin.json');
+	const plugin = await pluginRes.json().catch(() => null);
+	chk('ai-plugin.json 指向真实的 openapi',
+		pluginRes.status === 200 && /openapi\.yaml$/.test(plugin?.api?.url ?? ''),
+		plugin?.api?.url ?? 'HTTP ' + pluginRes.status);
+
+	const apiIndexRes = await fetch(BASE + '/api/v1');
+	const apiIndex = await apiIndexRes.json().catch(() => null);
+	chk('/api/v1 是可解析的路由索引',
+		apiIndexRes.status === 200 && Array.isArray(apiIndex?.routes) && apiIndex.routes.length >= 3,
+		'HTTP ' + apiIndexRes.status + ' routes=' + (apiIndex?.routes?.length ?? 0));
+
+	const llmsTxt = await (await fetch(BASE + '/llms.txt')).text();
+	chk('llms.txt 指向 openapi 与 API 索引',
+		llmsTxt.includes('/openapi.yaml') && llmsTxt.includes('/api/v1'),
+		'缺链接');
 }
 
 try {
