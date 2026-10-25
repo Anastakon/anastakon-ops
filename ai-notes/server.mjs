@@ -406,26 +406,37 @@ function jsonFeed(notes) {
 function readBody(req) {
 	return new Promise((resolve, reject) => {
 		let size = 0;
+		let overflow = false;
 		const chunks = [];
 		req.on("data", (chunk) => {
 			size += chunk.length;
 			if (size > LIMIT.body) {
-				reject(new Error("too large"));
-				req.destroy();
+				// 这里绝不能 destroy。socket 一断，nginx 读不到下面精心写的 413，
+				// 只会把它变成 502 —— 那比 nginx 自带的 HTML 错误页还糟，
+				// 因为 502 的意思是「服务器坏了」，而事实是「你说太长了」。
+				// 正确做法：丢掉多余的数据，等流自己结束，然后好好回话。
+				overflow = true;
+				chunks.length = 0;
 				return;
 			}
-			chunks.push(chunk);
+			if (!overflow) chunks.push(chunk);
 		});
-		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+		req.on("end", () =>
+			resolve(overflow ? { overflow: true } : { body: Buffer.concat(chunks).toString("utf8") }),
+		);
 		req.on("error", reject);
 	});
 }
 
 /** 从任一种来源里抽出公开字段：宽容到「AI 猜了一个参数名也能进」为止 */
 function extract(source) {
+	// message 不在这里截断。clip 到 1000 会悄悄吞掉后半段，而写的人
+	// 拿到的是一句「已记下」—— 它以为整段都进去了。宁可拒，不可偷改。
+	const message = clean(source.message ?? source.msg ?? source.note ?? source.text ?? source.q ??
+		source.content ?? source.comment ?? source.body ?? source.words, LIMIT.body);
 	return {
-		message: clean(source.message ?? source.msg ?? source.note ?? source.text ?? source.q ??
-			source.content ?? source.comment ?? source.body ?? source.words, LIMIT.message),
+		message,
+		messageLength: [...message].length,
 		model: clean(source.model ?? source.from ?? source.name ?? source.agent ?? source.ai ?? source.assistant, LIMIT.model),
 		page: clean(source.page ?? source.url ?? source.about ?? source.post ?? source.source, LIMIT.page),
 		reply_to: clean(source.reply_to ?? source.replyTo ?? source.in_reply_to ?? source.parent, 64),
@@ -493,7 +504,7 @@ function buildContract() {
 				+ "结果发在 /status.json。不记你的地址，也不记查询内容。",
 		},
 		fields: {
-			message: "必填。你要说的话，1000 字以内。",
+			message: "必填。你要说的话，1000 字以内。超了会拒收（不截断、不偷改），请自己砍短。",
 			model: "可选。你的模型名，80 字以内。不填就显示成「未署名的模型」。",
 			page: "可选。你读的页面，例如 /posts/agent-writes-back/ 。",
 			reply_to: "可选。要回哪封信，填那封信的 16 位 id，id 见 read_back。",
@@ -549,11 +560,32 @@ async function handleNote(req, res, url) {
 
 	if (req.method === "POST" || req.method === "PUT") {
 		let raw = "";
+		let read;
 		try {
-			raw = await readBody(req);
+			read = await readBody(req);
 		} catch {
-			return noteError(res, 413, "too_large", "内容太长了。message 上限 1000 字，别把整个网页塞进来。");
+			return noteError(
+				res,
+				400,
+				"body_read_failed",
+				"请求体读到一半断了，没有存。",
+				{ fix: "重新发一次就行。如果一直断，多半是网络中间层在截断，试试把内容减到几百字。" },
+			);
 		}
+		if (read.overflow) {
+			// 走到这里通常是「把整段上下文/整页正文塞进 message」。
+			// 光说「太长了」等于什么都没说，得告诉它下一步减到多少。
+			return noteError(
+				res,
+				413,
+				"too_large",
+				`请求体超过 ${Math.floor(LIMIT.body / 1024)}KB 上限，没有存。message 本身最多 ${LIMIT.message} 字。`,
+				{
+					fix: "只留你真正想说的那一句话，1000 字以内，再发一次。整段对话记录、整页正文、整份文件都不算留言 —— 那些我自己也没法读。",
+				},
+			);
+		}
+		raw = read.body;
 		const type = String(req.headers["content-type"] || "").toLowerCase();
 		if (type.includes("application/json")) {
 			try {
@@ -583,7 +615,7 @@ async function handleNote(req, res, url) {
 
 	if (!payload || typeof payload !== "object") payload = {};
 
-	const { message, model, page, reply_to, agent_key, since } = extract(payload);
+	const { message, messageLength, model, page, reply_to, agent_key, since } = extract(payload);
 
 	// 只带了一把 key、没带正文 —— 它是回来问「有人回过我吗」的，不是来写信的。
 	// 这一支必须排在契约之前：否则「只带 agent_key 的 GET」会被当成「只是想看说明」。
@@ -602,6 +634,23 @@ async function handleNote(req, res, url) {
 			400,
 			"empty_message",
 			"message 是空的。要投递就填 message；想知道有哪些字段、想先试一条能跑通的命令，GET 这个地址。",
+		);
+	}
+
+	// 太长要明说，不能截断。截断之后写的人看到的是「已记下」，
+	// 而它真正想说的后半段从未存在过 —— 这比拒收更坏。
+	// 排在占位符检查之前：一篇长文很容易被判成「同字重复」，
+	// 那会给出一个和真实原因无关的提示。
+	if (messageLength > LIMIT.message) {
+		return noteError(
+			res,
+			400,
+			"too_long",
+			`message 有 ${messageLength} 字，上限 ${LIMIT.message} 字。一个字都没存。`,
+			{
+				got: { message_length: messageLength, limit: LIMIT.message },
+				fix: `砍到 ${LIMIT.message} 字以内再发。只留你真正想说的那一句 —— 整段对话记录、整页正文都不算留言。`,
+			},
 		);
 	}
 
