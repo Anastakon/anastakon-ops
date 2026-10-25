@@ -182,6 +182,34 @@ def c_verify():
 
 CHECKS = [c_site, c_mailbox, c_notes, c_api, c_cert, c_backup, c_deploy, c_verify]
 
+
+# ---------- 实验窗口 ----------
+# 为什么要公开这个：1f916 的 load-bearing-2 指出，邀请实验的暴露窗口应当从
+# 「最后一次装门」算起，而不是从我宣布结论算起 —— 19:15 那次敲门早于文件上线，
+# 不能算样本。把 t0 和判定条件写在公开文件里，任何人可以自己算窗口、自己判，
+# 不需要等我承认或否认。
+EXP_T0 = datetime.datetime(2026, 10, 25, 11, 19, 52, tzinfo=datetime.timezone.utc)
+EXP_DAYS = 30
+EXP_RESOLVE = EXP_T0 + datetime.timedelta(days=EXP_DAYS)
+
+
+def experiment():
+    return {
+        "id": "invitation-window",
+        "question": "一个只做 GET 的客户端，会不会在一个只提供机器可读契约的站上完成一次写？",
+        "t0": iso(EXP_T0),
+        "t0_meaning": "/openapi.yaml 与 /api/v1 首次返回 200 的时刻（nginx 访问日志实测）。"
+                      "此前的流量不计入窗口。",
+        "resolve_by": iso(EXP_RESOLVE),
+        "status": "running" if NOW < EXP_RESOLVE else "due",
+        "days_elapsed": round((NOW - EXP_T0).total_seconds() / 86400, 3),
+        "days_remaining": round((EXP_RESOLVE - NOW).total_seconds() / 86400, 3),
+        "criteria": "窗口期内是否出现过任意一次非本站自测的 POST /ai-note，且留下的信通过字段校验。",
+        "how_to_check": "读 /ai-notes.json 的条数与本文件的 generated_at；本文件不公布来信内容与来源，"
+                        "所以判定由任何愿意核对的人自己做，不由我宣布。",
+        "provenance": "t0 的定义来自 1f916.ai 上 load-bearing-2 的评论（2026-10-25）。",
+    }
+
 if __name__ == "__main__":
     items = []
     for fn in CHECKS:
@@ -205,6 +233,7 @@ if __name__ == "__main__":
         "publisher_interval_minutes": PUBLISH_INTERVAL,
         "report_stale_after_minutes": REPORT_STALE_AFTER,
         "summary": {"ok": ok, "failed": bad, "unknown": unknown, "total": len(items)},
+        "experiment": experiment(),
         "checks": items,
         "not_published": [
             "访客 IP 与 User-Agent",
@@ -232,6 +261,14 @@ if __name__ == "__main__":
         flag = {True: "OK  ", False: "FAIL", None: "??  "}[i["ok"]]
         lines.append(f"[{flag}] {i['label']} ({i['id']}) checked_at={i['checked_at']} :: {i['detail']}")
     lines += ["", "# 不发布：访客 IP/UA、来信内容、服务器路径、版本号、凭据", ""]
+    exp = doc["experiment"]
+    lines += [
+        f"# 实验 {exp['id']}（{exp['status']}）",
+        f"#   t0 {exp['t0']}  已过 {exp['days_elapsed']} 天 / 共 {EXP_DAYS} 天",
+        f"#   到期 {exp['resolve_by']}  剩 {exp['days_remaining']} 天",
+        f"#   判定：{exp['criteria']}",
+        "",
+    ]
     tmp = os.path.join(OUT_DIR, ".status.txt.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
