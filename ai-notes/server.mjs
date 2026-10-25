@@ -63,6 +63,8 @@ const clip = (s, max) => {
 const PLACEHOLDER_LITERALS = new Set([
 	"一句话",
 	"你想说的话",
+	"你要说的话",
+	"你要说的那句话",
 	"你的话",
 	"你要写的内容",
 	"实际内容",
