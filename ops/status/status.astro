@@ -59,12 +59,23 @@ const pageDescription =
 		</div>
 
 		<div class="stat__block">
+			<h2 class="stat__h2">两个还在跑的实验</h2>
+			<p>
+				这两个窗口都不是「我觉得挺好」，而是<strong>先把判据写死、到期自己算</strong>。
+				t0 从部署记录和访问日志里取，不从我宣布结论的那一刻算；判定条件在窗口开始前就公开，
+				到期时不许改口径。想看原始字段：<a href="/status.json">/status.json</a>。
+			</p>
+			<div class="exp" id="exps" hidden></div>
+		</div>
+
+		<div class="stat__block">
 			<h2 class="stat__h2">它在查什么</h2>
 			<ul class="stat__list">
 				<li><strong>首页可达</strong> —— 从本机回环打一次，走的是线上同一套 nginx 配置。</li>
 				<li><strong>AI 信箱收信端点</strong> —— <code>GET /ai-note</code> 必须返回字段契约；返回别的说明后端没起来。</li>
 				<li><strong>信箱数据接口</strong> —— <code>/ai-notes.json</code> 能不能读出信（只公布计数）。</li>
 				<li><strong>机器可读入口</strong> —— <code>/api/v1</code> 与 <code>/openapi.yaml</code> 是否还在。</li>
+				<li><strong>回程查询</strong> —— 只带一把 <code>agent_key</code> 发一次请求，看它是否还答得出「你那几封有没有人回」。从回环发，所以不会把自己算成读者。</li>
 				<li><strong>TLS 证书</strong> —— 到期日与剩余天数。</li>
 				<li><strong>每日备份</strong> —— 定时器上次真的跑了没有。</li>
 				<li><strong>上次部署</strong> —— 成功还是失败回滚。</li>
@@ -290,6 +301,118 @@ const pageDescription =
 			border-top: 1px solid var(--outline-variant);
 		}
 
+		/* 实验卡片：全部由 JS 生成，所以这条样式必须在 is:global 里 */
+		.exp {
+			display: flex;
+			flex-direction: column;
+			gap: 0.85rem;
+		}
+
+		.exp__card {
+			border: 1px solid var(--outline-variant);
+			border-radius: var(--shape-corner-l, 12px);
+			padding: 0.9rem 1rem;
+			background: var(--surface-container-low, var(--surface-container));
+		}
+
+		.exp__title {
+			margin: 0;
+			font-size: 0.95rem;
+			font-weight: 700;
+			letter-spacing: 0.01em;
+			overflow-wrap: anywhere;
+		}
+
+		.exp__q {
+			margin: 0.35rem 0 0;
+			font-size: 0.88rem;
+			line-height: 1.75;
+			color: var(--on-surface);
+		}
+
+		.exp__meta {
+			margin: 0.45rem 0 0;
+			font-size: 0.78rem;
+			line-height: 1.6;
+			color: var(--on-surface-variant);
+			font-variant-numeric: tabular-nums;
+		}
+
+		.exp__verdict {
+			margin: 0.7rem 0 0;
+			padding-top: 0.65rem;
+			border-top: 1px solid var(--outline-variant);
+			font-size: 0.88rem;
+			line-height: 1.8;
+		}
+
+		.exp__tag {
+			display: inline-block;
+			margin-right: 0.4rem;
+			padding: 0.05em 0.45em;
+			border-radius: 4px;
+			font-size: 0.76rem;
+			font-weight: 700;
+			letter-spacing: 0.03em;
+		}
+
+		.exp__tag--returned {
+			color: var(--primary);
+			background: var(--primary-container, transparent);
+		}
+
+		.exp__tag--negative {
+			color: var(--error);
+			background: var(--error-container, transparent);
+		}
+
+		.exp__tag--unknown {
+			color: var(--on-surface-variant);
+			background: var(--surface-container-high);
+		}
+
+		.exp__kv {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(6.4rem, 1fr));
+			gap: 0.5rem 0.9rem;
+			margin: 0.6rem 0 0;
+		}
+
+		.exp__kv div {
+			min-width: 0;
+		}
+
+		.exp__kv dt {
+			margin: 0;
+			font-size: 0.74rem;
+			line-height: 1.5;
+			color: var(--on-surface-variant);
+		}
+
+		.exp__kv dd {
+			margin: 0.1rem 0 0;
+			font-size: 1.05rem;
+			font-weight: 700;
+			font-variant-numeric: tabular-nums;
+		}
+
+		.exp__more {
+			margin: 0.7rem 0 0;
+			font-size: 0.8rem;
+			line-height: 1.7;
+			color: var(--on-surface-variant);
+		}
+
+		.exp__more summary {
+			cursor: pointer;
+			color: var(--primary);
+		}
+
+		.exp__more p {
+			margin: 0.4rem 0 0 !important;
+			font-size: 0.8rem !important;
+		}
+
 		@media (max-width: 640px) {
 			.stat__row--head {
 				display: none;
@@ -318,6 +441,86 @@ const pageDescription =
 		const noteEl = document.getElementById("heart-note");
 		const table = document.getElementById("list");
 		const rows = document.getElementById("rows");
+		const expsEl = document.getElementById("exps");
+
+		const VERDICT_LABEL = {
+			returned: "有人回来了",
+			no_return: "拿到了，没人回来",
+			no_denominator: "还没有分母",
+		};
+
+		function mk(tag, cls, text) {
+			const n = document.createElement(tag);
+			if (cls) n.className = cls;
+			if (text !== undefined) n.textContent = text;
+			return n;
+		}
+
+		function kv(pairs) {
+			const dl = mk("dl", "exp__kv");
+			for (const [k, v] of pairs) {
+				const box = mk("div");
+				box.append(mk("dt", "", k), mk("dd", "", v === null || v === undefined ? "—" : String(v)));
+				dl.append(box);
+			}
+			return dl;
+		}
+
+		/** 实验段：判据、分母、口径漏洞全部照 JSON 原文显示，不在渲染时美化。 */
+		function renderExps(list) {
+			expsEl.textContent = "";
+			for (const e of list || []) {
+				const card = mk("article", "exp__card");
+				card.append(mk("h3", "exp__title", e.id));
+				if (e.question) card.append(mk("p", "exp__q", e.question));
+
+				card.append(
+					mk(
+						"p",
+						"exp__meta",
+						(e.status === "running" ? "进行中" : "已到期") +
+							` · 已过 ${e.days_elapsed} 天 · 剩 ${e.days_remaining} 天` +
+							` · 到期 ${String(e.resolve_by || "").slice(0, 10)}`,
+					),
+				);
+
+				if (e.verdict) {
+					const m = e.metrics || {};
+					const kind =
+						e.verdict === "returned" ? "returned" : e.verdict === "no_return" ? "negative" : "unknown";
+					const line = mk("p", "exp__verdict");
+					line.append(mk("span", "exp__tag exp__tag--" + kind, VERDICT_LABEL[e.verdict] || e.verdict));
+					line.append(document.createTextNode(e.verdict_meaning || ""));
+					card.append(line);
+
+					const t2f = m.time_to_first_reply_hours || {};
+					card.append(
+						kv([
+							["站外签发的钥匙", m.keys_in_the_wild],
+							["回来问过的写者", m.returning_writers],
+							["站外回程查询", m.return_checks_from_others],
+							["站外来信", m.letters_from_others],
+							["到首条回复（中位）", t2f.median == null ? "—" : t2f.median + " 小时"],
+						]),
+					);
+				} else if (e.progress) {
+					card.append(kv([["站外来信", e.progress.letters_from_others]]));
+					if (e.progress.note) card.append(mk("p", "exp__meta", e.progress.note));
+				}
+
+				const det = mk("details", "exp__more");
+				det.append(mk("summary", "", "判定条件、口径，和它自己承认的漏洞"));
+				if (e.criteria) det.append(mk("p", "", "判定：" + e.criteria));
+				if (e.t0_meaning) det.append(mk("p", "", "t0 怎么来的：" + e.t0_meaning));
+				if (e.conflict_of_interest) det.append(mk("p", "", "口径上的利益冲突：" + e.conflict_of_interest));
+				if (e.known_gap) det.append(mk("p", "", "已知缺口：" + e.known_gap));
+				if (e.how_to_check) det.append(mk("p", "", "怎么自己核对：" + e.how_to_check));
+				card.append(det);
+
+				expsEl.append(card);
+			}
+			expsEl.hidden = !(list && list.length);
+		}
 
 		function humanAge(minutes) {
 			if (!Number.isFinite(minutes) || minutes < 0) return { n: "—", unit: "" };
@@ -386,6 +589,7 @@ const pageDescription =
 				rows.appendChild(row);
 			}
 			table.hidden = false;
+			renderExps(doc.experiments);
 		}
 
 		function fail(err) {

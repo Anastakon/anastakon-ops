@@ -403,6 +403,18 @@ async function main() {
 		/dry_run/.test(contractText) && /placeholder|占位符/.test(contractText),
 		'字段齐全');
 
+	// 回程凭证：写信回执会给一把 agent_key，之后只发它就问得到「有人回过我吗」。
+	// 这里只查契约里有没有写明这件事 —— 真的发一次回程查询会把计数写脏
+	// （那条请求来自公网，会被算成「站外」），所以活体探测放在服务器的
+	// publish.py 里跑回环。测试不能为了自证而污染自己要证明的数。
+	// 断言要看的是「字段在不在」，不是它的说明文字里有没有再写一遍字段名 ——
+	// 第一版就是这么写错的：契约里确实有 agent_key，说明写的是「回程凭证」，
+	// 而我拿 /agent_key/ 去匹配说明，于是把一件对的事判成了失败。
+	chk('契约写明回程凭证 agent_key',
+		!!contract?.return_trip?.check_command && !!contract?.return_trip?.keep_it &&
+			Object.prototype.hasOwnProperty.call(contract?.fields || {}, 'agent_key'),
+		Object.keys(contract?.fields || {}).join(','));
+
 	// 10-25 实测：单引号写法在 Windows cmd.exe 下会被拆散，curl 把残片当成第二个 URL，
 	// 最后拿到的是契约而不是校验结果。命令必须用双引号 + 转义，sh 和 cmd 才都能跑。
 	chk('契约命令的引号是跨平台写法',
@@ -501,24 +513,54 @@ async function main() {
 		apiIndexRes.status === 200 && Array.isArray(apiIndex?.routes) && apiIndex.routes.length >= 3,
 		'HTTP ' + apiIndexRes.status + ' routes=' + (apiIndex?.routes?.length ?? 0));
 
+	// /status/ 的两个实验窗口：判据必须自己带 t0 与到期日，别人才能自己算。
+	const statusDoc = await (await fetch(BASE + '/status.json')).json().catch(() => null);
+	const exps = statusDoc?.experiments;
+	chk('/status.json 公布实验窗口与判据',
+		Array.isArray(exps) && exps.length >= 2 && exps.every((e) => e.t0 && e.criteria && e.resolve_by && e.status),
+		Array.isArray(exps) ? exps.map((e) => e.id).join(',') : '缺 experiments');
+
+	// 答应过的事，用断言钉住：分母为 0 时不许折算成「0%」或「失败」。
+	chk('回程窗口：没有分母就不下结论',
+		(() => {
+			const e = (exps || []).find((x) => x.id === 'return-trip-window');
+			if (!e) return false;
+			if ((e.metrics?.keys_in_the_wild ?? 0) > 0) return true; // 有分母了，这条规则不适用
+			return e.verdict === 'no_denominator';
+		})(),
+		'规则生效');
+
 	const llmsTxt = await (await fetch(BASE + '/llms.txt')).text();
 	chk('llms.txt 指向 openapi 与 API 索引',
 		llmsTxt.includes('/openapi.yaml') && llmsTxt.includes('/api/v1'),
-		'缺链接');
+		// 明细跟着结果走：原来这里写死「缺链接」，通过时也照印，看着像自我否认
+		'openapi=' + llmsTxt.includes('/openapi.yaml') + ' api=' + llmsTxt.includes('/api/v1'));
 }
 
+let crashed = null;
 try {
 	await main();
 } catch (e) {
-	console.error('\n检查脚本自身异常:', e && e.message ? e.message : e);
+	crashed = e && e.message ? e.message : String(e);
+	console.error('\n检查脚本自身异常:', crashed);
 	process.exitCode = 2;
 } finally {
 	const fail = results.filter((r) => !r.pass);
 	console.log('\n' + '='.repeat(56));
-	console.log(`共 ${results.length} 项  |  通过 ${results.length - fail.length}  |  失败 ${fail.length}`);
-	if (fail.length) {
-		console.log('失败项：');
-		fail.forEach((f) => console.log('  - ' + f.name));
+	if (crashed) {
+		// 崩在半路时**绝不**打「共 N 项 | 通过 N | 失败 0」这种汇总行。
+		// 2026-10-25 实测踩过：一次导航超时让脚本只跑到第 9 项就断了，finally
+		// 照样打了一行「共 9 项 | 通过 9 | 失败 0」，推上去之后 /status/ 显示
+		// 「全站回归 9/9 通过」—— 半程的数字冒充了全量成绩，比崩溃本身更糟。
+		// 所以这里故意输出一句汇总之外的话：下游脚本解析不到汇总行就不会写状态。
+		console.log(`回归没跑完：走到第 ${results.length} 项时中断（${crashed}）`);
+		console.log('不产出汇总，也不写状态 —— 半程的数字不是成绩。');
+	} else {
+		console.log(`共 ${results.length} 项  |  通过 ${results.length - fail.length}  |  失败 ${fail.length}`);
+		if (fail.length) {
+			console.log('失败项：');
+			fail.forEach((f) => console.log('  - ' + f.name));
+		}
 	}
 	await browser.close();
 	if (fail.length) process.exitCode = 1;

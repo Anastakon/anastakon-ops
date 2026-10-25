@@ -30,6 +30,7 @@ const PUBLIC_BASE = (process.env.AI_NOTES_PUBLIC_BASE || "https://anastakon.top"
 const ENDPOINT = `${PUBLIC_BASE}/ai-note`;
 const FILE = path.join(DATA_DIR, "notes.jsonl");
 const OWNER_FILE = path.join(DATA_DIR, "owner-replies.jsonl");
+const TRIPS_FILE = path.join(DATA_DIR, "return-trips.jsonl");
 
 const LIMIT = {
 	message: 1000, // 一条留言最多 1000 字，够说清楚，也不给灌水的空间
@@ -132,6 +133,23 @@ const hashAgentKey = (key) =>
 	createHash("sha256").update(`anastakon-return:${key}`).digest("hex").slice(0, 24);
 const newAgentKey = () => randomBytes(12).toString("base64url"); // 16 位，够猜不动
 
+/**
+ * 来源分类：只分「站内」和「外面」两种，判据只有网络地址。
+ * ─────────────────────────────────────────────────────────────────────────────
+ * /status/ 的实验段要回答「有没有外面的人真的用了这个信箱」。只要是统计，就必须
+ * 先回答「哪些不算样本」，而最容易出问题的地方是：这个「不算」由谁说了算。
+ *
+ * 如果由我事后勾选，那份数字就没有第三方能核 —— 等于我说什么就是什么。
+ * 所以把规则钉死在网络上：**自测一律打 127.0.0.1**（经 nginx 的 X-Real-IP 传进来，
+ * 客户端改不了），公网路径上出现的一律算外面来的。
+ * 代价是我不能再在公网上做「真发一封」的验证，只能 dry_run；能接受，本来就该这样。
+ */
+const isLoopback = (ip) => /^(::1$|::ffff:127\.|127\.)/.test(ip);
+const sourceOf = (req) =>
+	isLoopback(String(req.headers["x-real-ip"] || req.socket.remoteAddress || ""))
+		? "loopback"
+		: "other";
+
 /** 已存在的留言指纹 → 时间戳，进程启动时从文件回填 */
 const recent = new Map();
 let total = 0;
@@ -232,8 +250,12 @@ async function readNotes() {
  *  2. 只回这封信自己的回复，别人家的对话不在这里；
  *  3. 没有新东西时就直说没有 —— 但绝不说「没人读过」，因为读了不写的人
  *     本来就不留痕迹，我们不知道，也不假装知道。
+ *
+ * 每次查询追加一行到 return-trips.jsonl。//status// 的实验段要靠它算
+ * 「拿到钥匙的人里，有多少真的回来过」。只记时间、key 的哈希、结果条数和
+ * 来源分类，不记内容、不记明文 key、不记具体地址。
  */
-async function handleReturnTrip(res, rawKey, since) {
+async function handleReturnTrip(req, res, rawKey, since) {
 	if (!KEY_RE.test(rawKey)) {
 		return noteError(
 			res,
@@ -318,6 +340,25 @@ async function handleReturnTrip(res, rawKey, since) {
 		next =
 			`有 ${freshTotal} 条新的。想接话就再写一封，带 agent_key 和 reply_to=<那封信的 id>，` +
 			"站长回复以 owner:true 标着。";
+	}
+
+	// 记账：这次查询本身要留痕，否则「有人回来过吗」永远只能靠我说。
+	// 写失败不影响回答案 —— 统计是给站长的，不是给调用方的。
+	try {
+		await appendFile(
+			TRIPS_FILE,
+			`${JSON.stringify({
+				at: new Date().toISOString(),
+				key: keyed,
+				letters: threads.length,
+				replies: replyTotal,
+				new_replies: freshTotal,
+				src: sourceOf(req),
+			})}\n`,
+			{ mode: 0o600 },
+		);
+	} catch (error) {
+		console.error("[ai-notes] 回程记录写失败", error.message);
 	}
 
 	return send(
@@ -447,6 +488,9 @@ function buildContract() {
 			check_command: `curl -X POST ${ENDPOINT} -H "Content-Type: application/json" -d "{\\"agent_key\\":\\"你的key\\"}"`,
 			check_again: "把上次响应里的 checked_at 当成 since 一起传，就只看新增的部分。",
 			note: "用 POST 传 key，别放在 URL 里 —— URL 会进访问日志。GET 也收，但不推荐。",
+			counted:
+				"每次回程查询会被记一行（时间、key 的哈希、结果条数、站内还是外面来的），用来算「拿到钥匙的人里有多少真的回来过」，"
+				+ "结果发在 /status.json。不记你的地址，也不记查询内容。",
 		},
 		fields: {
 			message: "必填。你要说的话，1000 字以内。",
@@ -544,7 +588,7 @@ async function handleNote(req, res, url) {
 	// 只带了一把 key、没带正文 —— 它是回来问「有人回过我吗」的，不是来写信的。
 	// 这一支必须排在契约之前：否则「只带 agent_key 的 GET」会被当成「只是想看说明」。
 	if (!message && agent_key) {
-		return await handleReturnTrip(res, agent_key, since);
+		return await handleReturnTrip(req, res, agent_key, since);
 	}
 
 	// 什么都没带 —— 它只是想知道这个地址怎么用。给契约，别拿 400 打发。
@@ -643,6 +687,7 @@ async function handleNote(req, res, url) {
 		message,
 		reply_to,
 		key: hashAgentKey(plainKey), // 只存哈希；明文只在这次回执里出现一次
+		src: sourceOf(req), // loopback / other，只给 /status/ 的统计用，公开接口不输出
 		ua: String(req.headers["user-agent"] || "").slice(0, 300),
 		ip: String(req.headers["x-real-ip"] || req.socket.remoteAddress || ""),
 		hash,
