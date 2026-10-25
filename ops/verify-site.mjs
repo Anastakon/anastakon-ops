@@ -378,6 +378,63 @@ async function main() {
 	const dotsPost = await fetch(BASE + '/ai-note?message=...');
 	chk('占位符被后端拒绝', dotsPost.status === 400, 'HTTP ' + dotsPost.status);
 
+	// 2026-10-25：伦敦那台机房爬虫照着页面模板发了 ?message=...，拿到 400 就再没回来。
+	// 它没读懂「接下来该发什么」。所以端点改成自己会讲：GET 一下是完整说明、出错回 JSON
+	// 带 fix、还能先 dry_run 试格式。这三条锁住，别哪天又退回成一句散文。
+	const contractRes = await fetch(BASE + '/ai-note');
+	const contract = await contractRes.json().catch(() => null);
+	chk('GET /ai-note 返回机器可读契约',
+		contractRes.status === 200 && !!contract?.try_first?.command && !!contract?.fields?.message && !!contract?.read_back,
+		contract ? 'ok' : '响应不是 JSON');
+
+	const contractText = JSON.stringify(contract ?? {});
+	chk('契约写明 dry_run 与出错怎么改',
+		/dry_run/.test(contractText) && /placeholder|占位符/.test(contractText),
+		'字段齐全');
+
+	// 10-25 实测：单引号写法在 Windows cmd.exe 下会被拆散，curl 把残片当成第二个 URL，
+	// 最后拿到的是契约而不是校验结果。命令必须用双引号 + 转义，sh 和 cmd 才都能跑。
+	chk('契约命令的引号是跨平台写法',
+		/-d "\{/.test(contract?.try_first?.command ?? ''),
+		contract?.try_first?.command?.includes("'") ? '仍在用单引号' : '双引号');
+
+	const badBody = await (await fetch(BASE + '/ai-note?message=...')).json().catch(() => null);
+	chk('占位符被拒时给出可执行提示',
+		badBody?.error === 'placeholder' && !!badBody?.fix && !!badBody?.contract,
+		badBody?.error ?? '响应不是 JSON');
+
+	// /ai-note 有 12r/m 的写入限速（burst 8）。这一节前面已经发过几次探针，
+	// 撞上 429 说明限速在正常工作，不是功能坏了 —— 按 Retry-After 等一下再试一次。
+	const beforeCount = (await (await fetch(BASE + '/ai-notes.json')).json()).count;
+	const dryBody = JSON.stringify({ message: '回归用的格式探针', model: 'verify', dry_run: true });
+	const postDry = () =>
+		fetch(BASE + '/ai-note', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: dryBody,
+		});
+	let dryRes = await postDry();
+	if (dryRes.status === 429) {
+		await sleep(3500);
+		dryRes = await postDry();
+	}
+	const dry = await dryRes.json().catch(() => null);
+	const afterCount = (await (await fetch(BASE + '/ai-notes.json')).json()).count;
+	chk('dry_run 只校验不落盘',
+		dryRes.status === 200 && dry?.stored === false && beforeCount === afterCount,
+		`HTTP ${dryRes.status} stored=${dry?.stored} ${beforeCount} → ${afterCount}`);
+
+	// 限速兜底也不能说胡话。nginx 默认的 429 是一页带样式的 HTML，
+	// agent 看不懂，只会当成站点挂了然后不再来。这里锁住「429 也是 JSON」。
+	let busyRes = await fetch(BASE + '/ai-note');
+	for (let i = 0; i < 10 && busyRes.status !== 429; i++) {
+		busyRes = await fetch(BASE + '/ai-note');
+	}
+	const busyJson = busyRes.status === 429 ? await busyRes.json().catch(() => null) : null;
+	chk('被限速时返回机器可读的 429',
+		busyJson?.error === 'rate_limited' && !!busyJson?.retry_after_seconds,
+		`HTTP ${busyRes.status}`);
+
 	// 这一节对应的都是「外部审查器会给分」的机器可读信号。
 	// 2026-10-24 第一次跑 agentswelcome.dev 的审计只有 37 分：sitemap 只产出了
 	// sitemap-index.xml、/.well-known/ 整个不存在、robots 只有通配符。

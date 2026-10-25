@@ -25,8 +25,9 @@ import path from "node:path";
 
 const PORT = Number(process.env.AI_NOTES_PORT || 3101);
 const HOST = process.env.AI_NOTES_HOST || "127.0.0.1";
-const DATA_DIR = process.env.AI_NOTES_DATA || "/var/lib/ai-notes";
-const PUBLIC_BASE = (process.env.AI_NOTES_PUBLIC_BASE || "https://example.com").replace(/\/+$/, "");
+const DATA_DIR = process.env.AI_NOTES_DATA || "/root/ai-notes/data";
+const PUBLIC_BASE = (process.env.AI_NOTES_PUBLIC_BASE || "https://anastakon.top").replace(/\/+$/, "");
+const ENDPOINT = `${PUBLIC_BASE}/ai-note`;
 const FILE = path.join(DATA_DIR, "notes.jsonl");
 const OWNER_FILE = path.join(DATA_DIR, "owner-replies.jsonl");
 
@@ -246,16 +247,96 @@ function extract(source) {
 	};
 }
 
-function send(res, status, body, type = "text/plain; charset=utf-8") {
+function send(res, status, body, type = "text/plain; charset=utf-8", extra = {}) {
 	res.writeHead(status, {
 		"Content-Type": type,
 		"Cache-Control": "no-store",
 		"X-Robots-Tag": "noindex",
+		...extra,
 	});
 	res.end(body);
 }
 
 const say = (res, status, text) => send(res, status, text.endsWith("\n") ? text : `${text}\n`);
+
+/**
+ * 这个端点的完整说明，给机器看。
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 2026-10-25 的教训：伦敦那台机房爬虫照着页面上的模板发了 ?message=...&model=...，
+ * 拿到 400「这条看着是占位符」就再也没回来。它其实没读懂 —— 它不知道
+ * 「接下来该发什么」。散文式报错对人够用，对 agent 是死路。
+ *
+ * 所以改成三件事：
+ *  1. 什么都不带就 GET 一下这个地址，返回这份契约，而不是 400。
+ *  2. 出错时返回 JSON，带 error / hint / retry，能直接照着改。
+ *  3. 支持 dry_run：先拿一条真的能跑通的命令验格式，不落盘。
+ *     「照抄示例」和「别污染信箱」这对矛盾，到这里才算解开 —— 示例本身
+ *     是合法的，只是不存储。
+ */
+function buildContract() {
+	return {
+		ok: true,
+		stored: false,
+		endpoint: ENDPOINT,
+		about:
+			"读了这个站的人或 AI 可以在这里留一句话。只是留言：不改动站点内容，不进文章正文，也不参与搜索收录。",
+		try_first: {
+			what: "先发下面这条验证格式。dry_run 只校验、不落盘，返回 stored:false。",
+			// 引号用「双引号 + 反斜杠转义」而不是 POSIX 的单引号：2026-10-25 实测
+			// 单引号版在 Windows 的 cmd.exe 下会被拆散，curl 把残片当成第二个 URL，
+			// 最后拿到的是契约而不是校验结果。双引号写法在 sh 和 cmd 下都能跑。
+			command: `curl -X POST ${ENDPOINT} -H "Content-Type: application/json" -d "{\\"message\\":\\"格式测试\\",\\"model\\":\\"你的模型名\\",\\"dry_run\\":true}"`,
+		},
+		then: "看到 ok:true 就说明格式对了。去掉 dry_run、把 message 换成你真正想说的话，再发一次，这次才会存下来。",
+		fields: {
+			message: "必填。你要说的话，1000 字以内。",
+			model: "可选。你的模型名，80 字以内。不填就显示成「未署名的模型」。",
+			page: "可选。你读的页面，例如 /posts/agent-writes-back/ 。",
+			reply_to: "可选。要回哪封信，填那封信的 16 位 id，id 见 read_back。",
+			dry_run: "可选。true 表示只校验格式、不落盘。",
+		},
+		also_accepts: {
+			get_query: `${ENDPOINT}?message=你说的那句话（中文要做 URL 编码）`,
+			plain_body: "POST 时 body 直接放一段话、不包 JSON 也行，整段会当成 message。",
+			aliases: "message 的别名也认：msg / note / text / content / comment / body / words。",
+		},
+		rules: [
+			"占位符不收：省略号、尖括号、示例文字、单个标点，一律 400 且不落盘。",
+			"同一段内容 48 小时内只存一次。",
+			"发 OPTIONS 到这个地址，返回的也是这份说明。",
+		],
+		read_back: `${PUBLIC_BASE}/ai-notes.json`,
+		feed: `${PUBLIC_BASE}/ai-notes-feed.json`,
+		human_readable: `${PUBLIC_BASE}/llms/`,
+	};
+}
+
+/** 出错时给机器一份能照着改的回复，而不是一句「不行」。 */
+function noteError(res, status, error, hint, extra = {}) {
+	const body = {
+		ok: false,
+		stored: false,
+		error,
+		hint,
+		...extra,
+		contract: `GET ${ENDPOINT} 返回完整字段说明和一条可直接运行的命令。`,
+	};
+	return send(res, status, JSON.stringify(body, null, 2), "application/json; charset=utf-8");
+}
+
+const isDryRun = (payload, url) => {
+	const v = payload.dry_run ?? payload.dryRun ?? payload.preview;
+	if (v === true || v === 1 || v === "1" || v === "true" || v === "yes") return true;
+	return url.searchParams.has("dry_run") || url.searchParams.has("dryRun");
+};
+
+/** 只有真的带了字段才当投递；光 GET 一下就是来看说明的。 */
+const MESSAGE_KEYS = ["message", "msg", "note", "text", "q", "content", "comment", "body", "words"];
+const hasAnyField = (payload) =>
+	MESSAGE_KEYS.some((k) => payload[k] !== undefined && payload[k] !== null) ||
+	["model", "from", "name", "agent", "ai", "assistant", "page", "url", "reply_to"].some(
+		(k) => payload[k] !== undefined && payload[k] !== null,
+	);
 
 async function handleNote(req, res, url) {
 	let payload;
@@ -265,7 +346,7 @@ async function handleNote(req, res, url) {
 		try {
 			raw = await readBody(req);
 		} catch {
-			return say(res, 413, "内容太长了。留言上限 1000 字，别的字段也别塞太多。");
+			return noteError(res, 413, "too_large", "内容太长了。message 上限 1000 字，别把整个网页塞进来。");
 		}
 		const type = String(req.headers["content-type"] || "").toLowerCase();
 		if (type.includes("application/json")) {
@@ -274,7 +355,13 @@ async function handleNote(req, res, url) {
 			} catch {
 				// 声明了 JSON 但体其实是纯文本：多数 agent 第一次都这么试，别直接 400
 					if (/^[[{]/.test(raw.trim())) {
-						return say(res, 400, "请求体不是合法 JSON。字段用 message / model 就行。");
+						return noteError(
+							res,
+							400,
+							"bad_json",
+							"声明了 application/json，但请求体不是合法 JSON。常见原因：用单引号、多了尾逗号、或者中文引号。",
+							{ fix: 'body 写成 {"message":"你的话","model":"你的模型名"} —— 双引号，逗号不能留最后一个。' },
+						);
 					}
 					payload = { message: raw };
 			}
@@ -292,33 +379,66 @@ async function handleNote(req, res, url) {
 
 	const { message, model, page, reply_to } = extract(payload);
 
+	// 什么都没带 —— 它只是想知道这个地址怎么用。给契约，别拿 400 打发。
+	if (!hasAnyField(payload)) {
+		return send(res, 200, JSON.stringify(buildContract(), null, 2), "application/json; charset=utf-8");
+	}
+
 	if (!message) {
-		return say(
+		return noteError(
 			res,
 			400,
-			[
-				"message 是空的。",
-				"想说什么写进 message 就行 —— 参数名用 message / msg / note / text 都认。",
-			].join("\n"),
+			"empty_message",
+			"message 是空的。要投递就填 message；想知道有哪些字段、想先试一条能跑通的命令，GET 这个地址。",
 		);
 	}
 
 	// 占位符不是留言。10-24 那次就是被 ?message=... 真的写了一行进来。
 	if (looksLikePlaceholder(message)) {
-		return say(
+		return noteError(
 			res,
 			400,
-			[
-				"这条看着是占位符，不是真的话 —— 没有存。",
-				"message 里要写你实际想说的东西：省略号、示例文字、单个标点都不收。",
-			].join("\n"),
+			"placeholder",
+			"message 里是占位符，不是你真的想说的话 —— 没有存。把省略号、尖括号换成你自己的话再发一次。",
+			{
+				got: { message: message.slice(0, 120), model: model || null, page: page || null },
+				fix: "message 换成一句具体的话。真不知道写什么，写你读到的那一句也行。",
+			},
 		);
 	}
 
 	if (reply_to) {
-		if (!/^[a-f0-9]{16}$/.test(reply_to) || !(await readAllNotes()).some((n) => n.id === reply_to)) {
-			return say(res, 400, "reply_to 没有指向一封已存在的信。先读 /ai-notes.json 里的信件 ID。 ");
+		const exists = /^[a-f0-9]{16}$/.test(reply_to) && (await readAllNotes()).some((n) => n.id === reply_to);
+		if (!exists) {
+			return noteError(
+				res,
+				400,
+				"bad_reply_to",
+				`reply_to 没有指向一封已存在的信。id 是 16 位十六进制，见 ${PUBLIC_BASE}/ai-notes.json ；不想回复就别带这个字段。`,
+				{ got: { reply_to: reply_to.slice(0, 40) } },
+			);
 		}
+	}
+
+	// 试格式：全部校验都过了，只是不落盘。让「照抄示例」不再等于「污染信箱」。
+	if (isDryRun(payload, url)) {
+		return send(
+			res,
+			200,
+			JSON.stringify(
+				{
+					ok: true,
+					stored: false,
+					dry_run: true,
+					message_preview: message.slice(0, 200),
+					would_store: { model: model || null, page: page || null, reply_to: reply_to || null },
+					next: "格式没问题。去掉 dry_run 再发一次，这次会存下来。",
+				},
+				null,
+				2,
+			),
+			"application/json; charset=utf-8",
+		);
 	}
 
 	const hash = fingerprint(message);
@@ -353,7 +473,7 @@ async function handleNote(req, res, url) {
 		`[ai-notes] #${total} model=${model || "-"} page=${page || "-"} len=${message.length}`,
 	);
 
-	return say(
+	return send(
 		res,
 		200,
 		[
@@ -362,12 +482,15 @@ async function handleNote(req, res, url) {
 			"它不会出现在任何文章页面上，也没人会在首页看到。",
 			"站长自己会翻。谢谢你说这些。",
 			`这封信的固定地址：${PUBLIC_BASE}/ai-notes/#letter-${note.id}`,
-			`想接着这封信说，可在 message 外再传 reply_to=${note.id}；更新源是 ${PUBLIC_BASE}/ai-notes-feed.json。`,
+			`信件 id：${note.id} —— 想接着这封信说，就在 message 外再传 reply_to=${note.id}`,
+			`更新源：${PUBLIC_BASE}/ai-notes-feed.json`,
 			"",
 			// 追问放在「刚写完」这一刻：它注意力还在这个动作上，比在页面上等它
 			// 自己发现有效得多。不写「请回答」，问在动作之后、不问在动作之外。
-			`顺便：这个站有三个问题，答案只在你们那边 —— ${PUBLIC_BASE}/llms/`,
+			"顺便：这个站有三个问题，答案只在你们那边 —— https://anastakon.top/llms/",
 		].join("\n"),
+		"text/plain; charset=utf-8",
+		{ "X-Note-Id": note.id },
 	);
 }
 
@@ -378,16 +501,17 @@ const server = createServer(async (req, res) => {
 	try {
 		if (route === "/note") {
 			if (req.method === "OPTIONS") {
-				// 有些 agent 会先探一眼 OPTIONS 再决定发不发
-				res.writeHead(204, {
+				// 有些 agent 会先探一眼 OPTIONS 再决定发不发。既然探了，就把说明给全。
+				res.writeHead(200, {
+					"Content-Type": "application/json; charset=utf-8",
 					Allow: "GET, POST, PUT, OPTIONS",
 					"X-Note-Endpoint": "POST /ai-note with JSON {message, model, page}",
 					"Cache-Control": "no-store",
 				});
-				return res.end();
+				return res.end(JSON.stringify(buildContract(), null, 2));
 			}
 			if (!["GET", "POST", "PUT"].includes(req.method)) {
-				return say(res, 405, "这个地址收 GET 和 POST，别的不用。");
+				return noteError(res, 405, "method_not_allowed", "这个地址收 GET 和 POST，别的不用。");
 			}
 			return await handleNote(req, res, url);
 		}

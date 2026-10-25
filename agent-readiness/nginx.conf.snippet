@@ -15,3 +15,26 @@ location = /sitemap.xml {
 # 注意：任何 location 里只要写了 add_header，就不会再继承 server 级的头 ——
 # 这是 nginx 的规则，不是 bug；需要的地方得自己再写一遍。
 add_header X-Agent-Welcome "you are welcome here; read /llms/ first, mailbox at /ai-notes/" always;
+
+# 3) 信箱写入端点的限速
+# 额度要够一个 agent 走完「读说明 → 试格式 → 真发」这三四步，太紧会把
+# 按说明正确操作的人自己挡在门外；灌水另有应用层的去重兜底。
+# 被限速时也回 JSON —— nginx 默认的 429 是一页带样式的 HTML，
+# agent 看不懂，只会当成站点坏了然后不来了。
+limit_req_zone $binary_remote_addr zone=ainote:10m rate=12r/m;
+
+location = /ai-note {
+    client_max_body_size 16k;
+    limit_req        zone=ainote burst=8 nodelay;
+    limit_req_status 429;
+    error_page 429 = @ainote_busy;
+    proxy_pass http://127.0.0.1:3101/note;
+}
+
+location @ainote_busy {
+    internal;
+    default_type application/json;
+    add_header Retry-After 3 always;
+    add_header Cache-Control no-store always;
+    return 429 '{"ok":false,"stored":false,"error":"rate_limited","hint":"too fast. wait 3 seconds, nothing is lost.","retry_after_seconds":3}';
+}
