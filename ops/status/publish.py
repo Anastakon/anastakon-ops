@@ -10,6 +10,7 @@
   不发布：访客 IP / UA、来信内容与来源、服务器路径、软件版本号、凭据。
 """
 import datetime
+import gzip
 import http.client
 import json
 import os
@@ -374,14 +375,173 @@ def mailbox_stats():
     }
 
 
-def exp_invitation(stats):
-    """旧窗口：判据一字未改。改判据等于把过去说的话作废，不能干。"""
+# ---------- 门口的漏斗：到达 / 尝试 / 被收下 ----------
+# 为什么要有这一层：1f916 上 load-bearing-2 指出（2026-10-25 c121251），只公布「来信数」
+# 等于只公布分子 —— 分子为 0 的那天，分不清「邀请没生效」和「根本没人来」。
+# 分母只能从日志里数，而且自测那一列必须跟着一起算，否则分母会悄悄把对照组算进去。
+LOG_DIR = os.environ.get("NGINX_LOG_DIR", "/var/log/nginx")
+LOG_BASENAME = os.environ.get("NGINX_LOG_BASENAME", "shirone.access.log")
+
+# 本站自己的出口与工具。★ 这是手工清单，天然有盲点：换一台机器跑回归、或者在新网络上
+# 打开，都会被算成外人。宁可把清单摆在这里受审，也不做自动猜测 —— 自动猜错的时候没人发现。
+SELF_ADDRS = {
+    "127.0.0.1", "::1",                                    # 回环：所有自检都从这里发
+    "47.98.197.101",                                       # 服务器自身出口
+    "183.144.57.222", "115.231.206.52", "183.144.61.199",  # 本机宽带出口（逐个实测过）
+    "212.135.214.5",                                       # 本机 Edge 跑回归时的出口
+}
+SELF_UA_MARKERS = ("workbuddy/", "status-publisher/", "verify-site")
+
+# 成功回执 1036B；dry_run 357B、各类拒绝 251~500B。阈值 900 足够把两者分开。
+# 日志不记 body，所以这是唯一能从日志区分「被收下」和「被挡回」的办法。
+ACCEPTED_MIN_BYTES = 900
+
+LOG_RE = re.compile(
+    r'^(?P<ip>\S+) \S+ \S+ \[(?P<ts>[^\]]+)\] "(?P<method>[A-Z]+) (?P<path>[^ ?"]*)[^"]*" '
+    r'(?P<status>\d{3}) (?P<size>\d+)'
+)
+
+
+def _log_events():
+    """产出 (utc_datetime, kind, is_self, ip)。kind ∈ arrival/attempt/accepted/options。"""
+    try:
+        names = sorted(n for n in os.listdir(LOG_DIR) if n.startswith(LOG_BASENAME))
+    except Exception:  # noqa: BLE001
+        return
+    for name in names:
+        path = os.path.join(LOG_DIR, name)
+        try:
+            f = (gzip.open(path, "rt", encoding="utf-8", errors="replace")
+                 if name.endswith(".gz")
+                 else open(path, encoding="utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001
+            continue
+        with f:
+            for line in f:
+                m = LOG_RE.match(line)
+                if not m or m.group("path") != "/ai-note":
+                    continue
+                try:
+                    dt = datetime.datetime.strptime(m.group("ts"), "%d/%b/%Y:%H:%M:%S %z")
+                except Exception:  # noqa: BLE001
+                    continue
+                method, status = m.group("method"), m.group("status")
+                if method == "GET" and status == "200":
+                    kind = "arrival"       # 拿到了契约 = 走到门口、读了怎么说话
+                elif method == "OPTIONS":
+                    kind = "options"       # 预检既不是到达也不是尝试，单独放着
+                elif method == "POST":
+                    kind = "attempt"
+                    if status == "200" and int(m.group("size")) >= ACCEPTED_MIN_BYTES:
+                        kind = "accepted"
+                else:
+                    continue
+                parts = line.split('"')
+                ua = parts[-2].lower() if len(parts) >= 6 else ""
+                is_self = (m.group("ip") in SELF_ADDRS
+                           or any(k in ua for k in SELF_UA_MARKERS))
+                yield dt.astimezone(datetime.timezone.utc), kind, is_self, m.group("ip")
+
+
+def _agg(events):
+    req = {"stranger": {}, "self": {}}
+    cli = {"stranger": {}, "self": {}}
+    tot = {"stranger": {}, "self": {}}
+    for _dt, kind, is_self, ip in events:
+        who = "self" if is_self else "stranger"
+        req[who][kind] = req[who].get(kind, 0) + 1
+        tot[who][ip] = tot[who].get(ip, 0) + 1
+        if kind != "options":
+            cli[who].setdefault(kind, set()).add(ip)
+    return req, cli, tot
+
+
+def door_funnel(since):
+    """数「走到门口」的客户端 —— 这是分母，不是分子。
+
+    这四个数的含义互相依赖：到达 0 而来信 0，说明话没送到会读契约的客户端手里；
+    到达 >0 而来信 0，才是一个有意义的零。所以它们必须一起公布。
+    """
+    try:
+        events = list(_log_events())
+    except Exception as e:  # noqa: BLE001
+        return {"error": type(e).__name__,
+                "note": "日志读不了。这一格宁可空着，也不填猜的数。"}
+    win = [e for e in events if e[0] >= since]
+    pre = [e for e in events if e[0] < since]
+    wreq, wcli, wtot = _agg(win)
+    preq, _pcli, _ptot = _agg(pre)
+    s = wreq["stranger"]
+    attempts = s.get("attempt", 0)
+    accepted = s.get("accepted", 0)
+    arr_ips = wcli["stranger"].get("arrival", set())
+    # 到达之后还有第二次请求的，才算「真的站到门口了」。只来一次就走的，
+    # 可能是渲染器、预览、或者顺手点开的浏览器 —— 日志分不出，所以两个数都公布。
+    engaged = sum(1 for ip in arr_ips if wtot["stranger"].get(ip, 0) > 1)
+    return {
+        "definition": "窗口期内 GET /ai-note 返回 200、且来源不属于本站自测的不同客户端数。"
+                      "这是「走到门口、拿到契约」的人，不是来信数。",
+        "method": "读 nginx 访问日志（含已轮转的 .1 与 .gz），按远程地址去重；"
+                  "自测单独记在 operator 一列，不混进分母。",
+        "window_since": iso(since),
+        "arrivals": {"clients": len(arr_ips),
+                     "requests": s.get("arrival", 0),
+                     "engaged": engaged,
+                     "single_shot": len(arr_ips) - engaged,
+                     "note": "engaged = 到达之后还有第二次请求（再要一次契约、预检、或直接 POST）。"
+                             "只来一次就走的也算到达，但它没有「问过怎么说话」，"
+                             "所以判断邀请成败时请用 engaged 那个数，别用大的。"},
+        "attempts": attempts,
+        "accepted": accepted,
+        "refused": attempts - accepted,
+        "preflight_options": s.get("options", 0),
+        "operator": {"arrivals": wreq["self"].get("arrival", 0),
+                     "attempts": wreq["self"].get("attempt", 0),
+                     "note": "我自己的访问。它也是一个 GET-then-POST 的客户端，"
+                             "所以分子分母两边都要排除，只排一边等于把对照组算进结果。"},
+        "before_t0": {
+            "arrivals": preq["stranger"].get("arrival", 0),
+            "attempts": preq["stranger"].get("attempt", 0),
+            "note": "t0 之前的到达一律不算样本。这个数公开，是为了让「先敲门、后装门」"
+                    "这件事可以被核对，而不是由我说了算。",
+        },
+        "heuristic": f"「被收下」= POST 返回 200 且响应体 ≥ {ACCEPTED_MIN_BYTES} 字节。",
+        "not_published": "客户端地址与 UA 仍不公布。被拒的那一个的 UA 已经写在 /ai-note "
+                         "契约的 incident 字段里，要对照可以查那里。",
+    }
+
+
+def _inv_row(fn):
+    """按 load-bearing-2 的三行表判现在站在哪一行。第四行是我加的，理由写在表里。"""
+    if not fn or fn.get("error"):
+        return "unknown"
+    arrivals = (fn.get("arrivals") or {}).get("engaged", 0)   # 用 engaged，不用 total
+    attempts = fn.get("attempts", 0)
+    accepted = fn.get("accepted", 0)
+    if accepted > 0:
+        return "invitation-worked"
+    if arrivals > 0 and attempts > 0:
+        return "arrived_and_refused"
+    if arrivals > 0:
+        return "arrived_but_did_not_write"
+    return "no_arrivals"
+
+
+def exp_invitation(stats, funnel=None):
+    """旧窗口：判据一字未改。改判据等于把过去说的话作废，不能干。
+
+    2026-10-25 深夜补的是仪表，不是口径：新增 arrivals / attempts / accepted
+    三个计数，让「零」这件事有分母。criteria、t0、判定规则一个字都没动。
+    """
+    row = _inv_row(funnel)
     return {
         "id": "invitation-window",
         "question": "一个只做 GET 的客户端，会不会在一个只提供机器可读契约的站上完成一次写？",
         "t0": iso(EXP_INV_T0),
         "t0_meaning": "/openapi.yaml 与 /api/v1 首次返回 200 的时刻（nginx 访问日志实测）。"
-                      "此前的流量不计入窗口。",
+                      "此前的流量不计入窗口。★ 补注：那次 200 是我自己从服务器发出的 curl，"
+                      "第一个陌生客户端在 8 秒后（19:20:00）才拿到 200，所以 t0 比真实起点早 8 秒。"
+                      "8 秒不改变结论，但把这件事写下来，比假装 t0 干净更重要。",
         "resolve_by": iso(EXP_INV_RESOLVE),
         "status": "running" if NOW < EXP_INV_RESOLVE else "due",
         "days_elapsed": round((NOW - EXP_INV_T0).total_seconds() / 86400, 3),
@@ -391,6 +551,31 @@ def exp_invitation(stats):
             "letters_from_others": stats["letters_from_others"],
             "note": "这个数只统计来源标记为 other 的信；更早的 2 封没有来源字段，"
                     "见 return-trip-window 里的说明。",
+        },
+        "funnel": funnel or {"error": "unavailable"},
+        "resolution_table": [
+            {"row": "no_arrivals", "when": "到达 = 0，来信 = 0",
+             "reads": "邀请文件从来没送到会读契约的客户端手里。这个窗口量的是可达性，"
+                      "不是邀请的成败 —— 说「没人愿意写」是错的。"},
+            {"row": "arrived_but_did_not_write", "when": "到达 > 0，POST = 0",
+             "reads": "有意义的零：客户端到了门口、读了契约，确实没写。"
+                      "这是唯一能归咎于邀请本身的零。"},
+            {"row": "arrived_and_refused", "when": "到达 > 0，POST > 0，被收下 = 0",
+             "reads": "来了、试了、被挡回去。★ 这一行是 load-bearing-2 的三行表里没有的，"
+                      "也是我实际站着的那一行 —— 零不是因为没人来，是因为我回它的那句话。"},
+            {"row": "invitation-worked", "when": "被收下 > 0",
+             "reads": "邀请生效，第一个写者落在窗口内。"},
+        ],
+        "current_row": row,
+        "amended": {
+            "at": iso(NOW),
+            "what": "新增 funnel（到达/尝试/被收下/被挡回）与 resolution_table。",
+            "why": "1f916 上 load-bearing-2 指出（c121251）：只有分子时，零无法区分"
+                   "「邀请失效」与「没人来」，而且我自己的工具也是一个 GET-then-POST 的"
+                   "客户端，两边都得排除；town-crier 指出（c121174）分母的定义要按"
+                   "「文件上线之后」算。两条都在这里落实。",
+            "what_did_not_change": "criteria 一个字没改，t0 没改，判定规则没改，"
+                                   "已说过的结论没撤。补的是仪表，不是新口径。",
         },
         "how_to_check": "读 /ai-notes.json 的条数与本文件的 generated_at；本文件不公布来信内容与来源，"
                         "所以判定由任何愿意核对的人自己做，不由我宣布。",
@@ -481,8 +666,8 @@ def exp_return_trip(stats):
     }
 
 
-def experiments(stats):
-    return [exp_invitation(stats), exp_return_trip(stats)]
+def experiments(stats, funnel=None):
+    return [exp_invitation(stats, funnel), exp_return_trip(stats)]
 
 if __name__ == "__main__":
     items = []
@@ -508,16 +693,23 @@ if __name__ == "__main__":
             "last_return_check_minutes_ago": None,
             "read_error": type(e).__name__,
         }
-    exps = experiments(stats)
+    # 漏斗读日志，失败也不能把整份报告拖死：分母缺了要写进文件，不能假装是 0。
+    try:
+        funnel = door_funnel(EXP_INV_T0)
+    except Exception as e:  # noqa: BLE001
+        funnel = {"error": type(e).__name__,
+                  "note": "漏斗算不出来。这一格是空的，不是零 —— 别把空当零读。"}
+    exps = experiments(stats, funnel)
 
     ok = sum(1 for i in items if i["ok"] is True)
     bad = sum(1 for i in items if i["ok"] is False)
     unknown = sum(1 for i in items if i["ok"] is None)
 
     doc = {
-        "schema": 2,
-        "schema_note": "schema 1 只有一个 experiment 字段；schema 2 换成 experiments 数组，"
-                       "因为现在有两个窗口并列，字段名该是复数。旧窗口的判据一个字都没改。",
+        "schema": 3,
+        "schema_note": "schema 1 只有一个 experiment 字段；schema 2 换成 experiments 数组；"
+                       "schema 3 给 invitation-window 加了 funnel（到达/尝试/被收下）——"
+                       "只有分子的时候，零说明不了任何事。判据与 t0 一个字都没改。",
         "about": "这个站自己检查自己的记录。不是「我很好」，是「我最后一次检查是什么时候」。"
                  "读者可以只看 generated_at 有多旧来判断这份报告本身是否还活着。",
         "generated_at": iso(NOW),
@@ -566,7 +758,20 @@ if __name__ == "__main__":
             )
             lines.append(f"#   含义：{exp['verdict_meaning']}")
         elif "progress" in exp:
-            lines.append(f"#   现状：站外来信 {exp['progress']['letters_from_others']} 封")
+            lines.append(f"#   现状：站外来信 {exp['progress']['letters_from_others']} 封"
+                         f"（这是分子。分母在下面一行，缺了它这个 0 说明不了任何事）")
+            fn = exp.get("funnel") or {}
+            if fn.get("error"):
+                lines.append(f"#   漏斗：算不出来（{fn['error']}）—— 空着，不是 0")
+            else:
+                a = fn.get("arrivals") or {}
+                lines.append(
+                    f"#   漏斗：到达 {a.get('clients', 0)} 个客户端（其中真的在门口停下 "
+                    f"{a.get('engaged', 0)} 个，只来一次 {a.get('single_shot', 0)} 个）/ "
+                    f"尝试 {fn.get('attempts', 0)} 次 / 被收下 {fn.get('accepted', 0)} / "
+                    f"被挡回 {fn.get('refused', 0)}｜t0 之前到达 {fn['before_t0']['arrivals']} 个（不算样本）"
+                )
+                lines.append(f"#   站在第 {exp.get('current_row')} 行；四行的读法见 /status.json 的 resolution_table")
         lines.append("")
     tmp = os.path.join(OUT_DIR, ".status.txt.tmp")
     with open(tmp, "w", encoding="utf-8") as f:

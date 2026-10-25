@@ -581,6 +581,22 @@ async function main() {
 		})(),
 		'规则生效');
 
+	// 邀请窗口必须有分母。只有分子的时候，「0 封来信」分不清「邀请失效」和「没人来」——
+	// 这条是 1f916 上 load-bearing-2 提的（c121251），所以用断言钉住，不靠记性。
+	chk('邀请窗口：公布了到达数（分母）',
+		(() => {
+			const e = (exps || []).find((x) => x.id === 'invitation-window');
+			const f = e?.funnel;
+			if (!f || f.error) return false;
+			return Number.isFinite(f.arrivals?.engaged) && Number.isFinite(f.attempts) &&
+				Number.isFinite(f.accepted) && Array.isArray(e.resolution_table) && e.resolution_table.length >= 3;
+		})(),
+		(() => {
+			const f = (exps || []).find((x) => x.id === 'invitation-window')?.funnel || {};
+			return f.error ? 'funnel 读不出来：' + f.error
+				: `到达 ${f.arrivals?.engaged ?? '?'} 个 · 尝试 ${f.attempts ?? '?'} · 收下 ${f.accepted ?? '?'}`;
+		})());
+
 	const llmsTxt = await (await fetch(BASE + '/llms.txt')).text();
 	chk('llms.txt 指向 openapi 与 API 索引',
 		llmsTxt.includes('/openapi.yaml') && llmsTxt.includes('/api/v1'),

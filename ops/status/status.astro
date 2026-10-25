@@ -346,6 +346,47 @@ const pageDescription =
 			line-height: 1.8;
 		}
 
+		.exp__sub {
+			margin: 0.9rem 0 0.2rem;
+			padding-top: 0.65rem;
+			border-top: 1px solid var(--outline-variant);
+			font-size: 0.8rem;
+			font-weight: 700;
+			color: var(--on-surface-variant);
+			letter-spacing: 0.02em;
+		}
+
+		.exp__rows {
+			margin: 0.75rem 0 0;
+			padding: 0;
+			list-style: none;
+			display: flex;
+			flex-direction: column;
+			gap: 0.45rem;
+		}
+
+		.exp__row {
+			margin: 0;
+			padding: 0.4rem 0 0.4rem 0.7rem;
+			border-left: 2px solid var(--outline-variant);
+			font-size: 0.8rem;
+			line-height: 1.7;
+			color: var(--on-surface-variant);
+		}
+
+		.exp__row--here {
+			border-left-color: var(--primary);
+			color: var(--on-surface);
+			background: color-mix(in srgb, var(--primary) 7%, transparent);
+		}
+
+		.exp__here {
+			margin-left: 0.35rem;
+			font-weight: 700;
+			color: var(--primary);
+			white-space: nowrap;
+		}
+
 		.exp__tag {
 			display: inline-block;
 			margin-right: 0.4rem;
@@ -506,6 +547,41 @@ const pageDescription =
 				} else if (e.progress) {
 					card.append(kv([["站外来信", e.progress.letters_from_others]]));
 					if (e.progress.note) card.append(mk("p", "exp__meta", e.progress.note));
+				}
+
+				// 分母。没有它，上面那个「站外来信 0」说明不了任何事。
+				if (e.funnel && !e.funnel.error) {
+					const a = e.funnel.arrivals || {};
+					const pre = e.funnel.before_t0 || {};
+					const op = e.funnel.operator || {};
+					card.append(mk("p", "exp__sub", "分母：门口发生了什么"));
+					card.append(
+						kv([
+							["到达并拿到契约", `${a.clients ?? 0} 个客户端`],
+							["其中停下问过怎么说话", `${a.engaged ?? 0} 个`],
+							["只来一次就走", `${a.single_shot ?? 0} 个`],
+							["尝试写入", `${e.funnel.attempts ?? 0} 次`],
+							["被收下", `${e.funnel.accepted ?? 0} 次`],
+							["被挡回", `${e.funnel.refused ?? 0} 次`],
+							["t0 之前到达（不算样本）", `${pre.arrivals ?? 0} 个`],
+							["我自己的访问（已排除）", `${op.arrivals ?? 0} 次到达 / ${op.attempts ?? 0} 次尝试`],
+						]),
+					);
+					if (a.note) card.append(mk("p", "exp__meta", a.note));
+				} else if (e.funnel && e.funnel.error) {
+					card.append(mk("p", "exp__meta", "分母读不出来（" + e.funnel.error + "）—— 空着，不是 0。"));
+				}
+
+				if (Array.isArray(e.resolution_table) && e.resolution_table.length) {
+					const t = mk("ul", "exp__rows");
+					for (const r of e.resolution_table) {
+						const li = mk("li", r.row === e.current_row ? "exp__row exp__row--here" : "exp__row");
+						li.append(mk("strong", "", r.when || r.row));
+						li.append(document.createTextNode(" → " + (r.reads || "")));
+						if (r.row === e.current_row) li.append(mk("span", "exp__here", "← 现在在这里"));
+						t.append(li);
+					}
+					card.append(t);
 				}
 
 				const det = mk("details", "exp__more");
