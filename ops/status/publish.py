@@ -214,7 +214,10 @@ def c_verify():
         if total < 80:
             detail = f"{passed}/{total} 通过 —— 记录不完整，这次回归没跑完"
         elif code != 0:
-            detail = f"{passed}/{total} 通过，但脚本退出码 {code}（半程中断）"
+            # 别再一律写成「半程中断」：105 项里错 1 项也会让退出码变 1，
+            # 那种情况是「有失败项」，不是「没跑完」。说错原因比不给原因更糟。
+            why = f"有 {total - passed} 项没过" if total - passed > 0 else "脚本中途崩了"
+            detail = f"{passed}/{total} 通过，退出码 {code}（{why}）"
         else:
             detail = f"{passed}/{total} 通过" + ("" if ok else f"，失败 {total - passed}")
         return check("verify", "全站回归", ok, detail,
