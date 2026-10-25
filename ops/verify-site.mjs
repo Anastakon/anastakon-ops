@@ -41,13 +41,29 @@ page.on('request', (r) => {
 // ★ 站点对「页面文档」按 IP 限速 1r/s、burst 15（shirone.conf 的 doc_req）。
 //   回归是机器连发，不节流会把自己打成 429，从而误报成站点故障。这里排队成 ≥1.1s 一次。
 let _lastDocNav = 0;
+const slowNavs = [];
 async function go(path, wait = 500) {
 	const gap = 1100 - (Date.now() - _lastDocNav);
 	if (gap > 0) await sleep(gap);
 	_lastDocNav = Date.now();
-	const resp = await page.goto(BASE + path, { waitUntil: 'networkidle2', timeout: 60000 });
-	await sleep(wait);
-	return resp ? resp.status() : 0;
+	try {
+		const resp = await page.goto(BASE + path, { waitUntil: 'networkidle2', timeout: 25000 });
+		await sleep(wait);
+		return resp ? resp.status() : 0;
+	} catch (e) {
+		// networkidle2 要求「≤2 个连接在飞」。只要有一个资源卡住，它就永远等不到，
+		// 而页面本身早就可用了 —— 2026-10-25 实测：本机浏览器对同一批资源（/count、
+		// 两张 webp、一张 jpg）全部挂起不结算，同一时刻 curl 取它们都是 0.1s 内 200。
+		// 那不是站点故障，是这台机器的网络。所以这里降级为「继续」，但**记下来并打出来**：
+		// 断言一条没动，只是不让一个卡住的资源把整轮回归判死。
+		if (!/timeout/i.test(e && e.message ? e.message : '')) throw e;
+		slowNavs.push(path);
+		await sleep(wait);
+		const st = await page.evaluate(
+			() => (performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0,
+		);
+		return st;
+	}
 }
 const evalPage = (fn) => page.evaluate(fn);
 
@@ -176,7 +192,13 @@ async function main() {
 	let dup = 0;
 	let emptyBtn = 0;
 	for (let i = 0; i < 6; i++) {
-		await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+		try {
+			await page.reload({ waitUntil: 'networkidle2', timeout: 25000 });
+		} catch (e) {
+			// 同 go()：资源卡住不等于页面没加载，记下来继续，别让整轮作废
+			if (!/timeout/i.test(e && e.message ? e.message : '')) throw e;
+			slowNavs.push('/ (reload)');
+		}
 		await sleep(1700);
 		const m = await evalPage(() => ({
 			t: (document.getElementById('nf-title') || {}).textContent || '',
@@ -319,7 +341,17 @@ async function main() {
 	console.log('\n[11] AI 留言板（收信页 + 投递通道）');
 	// 这条链路横跨 nginx / 独立 node 服务 / 静态页三处，任何一处丢了都不会有别的检查发现
 	await sleep(1500);
-	const gbRes = await page.goto(BASE + '/ai-notes/', { waitUntil: 'networkidle2', timeout: 60000 });
+	let gbRes = null;
+	try {
+		gbRes = await page.goto(BASE + '/ai-notes/', { waitUntil: 'networkidle2', timeout: 25000 });
+	} catch (e) {
+		// 导航超时说明有资源没结算，但 DOM 已经好了。这一条要判的是「页面在不在」，
+		// 所以退化成直接 fetch 取状态码，而不是判失败。
+		if (!/timeout/i.test(e && e.message ? e.message : '')) throw e;
+		slowNavs.push('/ai-notes/');
+		const r = await fetch(BASE + '/ai-notes/');
+		gbRes = { status: () => r.status };
+	}
 	chk('收信页可访问', !!gbRes && gbRes.status() === 200, 'HTTP ' + (gbRes && gbRes.status()));
 	await page.waitForSelector('[data-letters-state]', { timeout: 15000 }).catch(() => {});
 	const gb = await page.evaluate(() => ({
@@ -561,6 +593,11 @@ try {
 			console.log('失败项：');
 			fail.forEach((f) => console.log('  - ' + f.name));
 		}
+	}
+	if (slowNavs.length) {
+		// 不藏起来：哪些页面「DOM 好了但资源没结算」要看得见，否则降级就成了遮羞布。
+		console.log(`\n⚠ ${slowNavs.length} 个页面有资源没在 25s 内结算（本机网络，非站点报错）：`);
+		console.log('  ' + slowNavs.join(' '));
 	}
 	await browser.close();
 	if (fail.length) process.exitCode = 1;
