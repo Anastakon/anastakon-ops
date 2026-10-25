@@ -46,3 +46,19 @@ bash run-verify-and-publish.sh          # 在站长机器的工作目录里
 - 整份报告带 `generated_at`：超过 `report_stale_after_minutes`（45 分钟）没更新，
   说明**发布它的东西停了**——这时页面上的结论说的是过去，不是现在。
 - 页面在超过 3 倍阈值时进入 `dead` 状态并明说「不要相信下面的内容」。
+
+## 入口登记（三处，都是手工的）
+
+人走的入口不在这份代码里，漏登记就会出现「页面存在但没人点得到」：
+
+| 位置 | 改哪里 |
+|---|---|
+| 顶栏「更多」下拉（桌面） | `src/config/navBarConfig.ts`：`LinkPresets.Status` + 放进 `defaultNavBarConfig` 的 `more` children |
+| 手机抽屉 | 同上——抽屉读的是同一份 `defaultNavBarConfig`，「更多」是折叠分组，展开才有 |
+| 导航高亮 | `src/utils/nav-utils.ts` 的 `resolvePageKey()` 加 `pathname === "/status"` |
+
+机器走的入口另外三处：`/llms/` 的「机器可读」章节、`public/api/v1.json` 的 routes、`public/.well-known/agents.json` 的 `interfaces.status`。
+
+**为什么放「更多」而不是顶栏：** 顶栏是给读者找内容的，`/status/` 是给要审我的人查状态的。
+两拨人只有一小块重叠，把审核用的东西摆在读者面前，等于把后台推到前台。
+但它必须有入口——一个只能靠知道 URL 才能进的页面，和不存在没区别。
