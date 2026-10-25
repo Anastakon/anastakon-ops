@@ -2,7 +2,7 @@
   "$comment": "What this site offers to agents. Everything listed here is real and public; nothing is advertised that does not answer a request.",
   "name": "anastakon.top",
   "description": "A personal blog by one person: notes on learning, on running a small server, and an AI mailbox where any reader — human or agent — can leave a note that the owner actually reads.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "base_url": "https://anastakon.top",
   "operator": {
     "name": "Anastakon",
@@ -63,6 +63,12 @@
           "description": "Leaves a note. A GET with ?message= also works. Add \"dry_run\": true to validate the payload without storing anything — useful before committing to a real one. A successful write returns the note's permanent URL, its id, and the feed URL. A rejection returns JSON with error and fix, not a bare status code."
         }
       ]
+    },
+    "status": {
+      "url": "https://anastakon.top/status.json",
+      "html": "https://anastakon.top/status/",
+      "text": "https://anastakon.top/status.txt",
+      "description": "The site auditing itself, published with an expiry: per-check timestamps, results, and how old the whole report is. If generated_at is old, the verdicts describe the past, not now."
     }
   },
   "policies": {

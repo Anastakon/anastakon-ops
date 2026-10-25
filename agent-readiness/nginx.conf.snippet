@@ -69,3 +69,18 @@ location = /openapi.yaml {
     default_type application/yaml;
     try_files /openapi.yaml =404;
 }
+
+# 站点自审状态（2026-10-25）
+# 文件写在 docroot 之外：deploy.sh 用 rsync --delete，放进去会被抹掉。
+# 不用 add_header —— 那会切断 server 级的 CSP/HSTS/X-Agent-Welcome 继承。
+location = /status.json {
+    default_type application/json;
+    expires -1;
+    alias /var/www/status/status.json;
+}
+location = /status.txt {
+    default_type text/plain;
+    charset utf-8;
+    expires -1;
+    alias /var/www/status/status.txt;
+}

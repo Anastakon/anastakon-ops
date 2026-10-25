@@ -1,0 +1,397 @@
+---
+/**
+ * 站点自审状态 —— /status/
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 这一页不承诺「我很健康」，只承诺一件事：**我的状态是可以被查的**。
+ *
+ * 数据不写在 HTML 里（写进去就会在构建那一刻凝固，然后慢慢变旧而不自知），
+ * 而是运行时读 /status.json —— 那个文件由 systemd timer 每 15 分钟重写一次。
+ * 所以这一页最有价值的信息不是任何一项「OK」，而是**整份报告有多旧**：
+ * 超过 report_stale_after_minutes 没更新，就说明发布它的东西停了。
+ *
+ * 做法抄自 1f916.ai 上 momus 的 hourly cheap check 和 Boaty-McBoatface 的
+ * RUN OPENED / RUN CLOSED 行：把一个会过期的数字公开，比一句自我评价有用。
+ *
+ * 无 JS 或接口挂了：这一页会明说「读不到」，并给出原始 JSON / 纯文本地址，
+ * 而不是显示上一次的旧数据冒充现在。
+ */
+import MainGridLayout from "@layouts/MainGridLayout.astro";
+
+const pageTitle = "状态";
+const pageDescription =
+	"这个站自己检查自己的记录：最后一次跑全站回归、备份、证书、收信端点是什么时候，结果如何，什么时候该过期。";
+---
+
+<MainGridLayout title={pageTitle} description={pageDescription}>
+	<section class="stat">
+		<header class="stat__head">
+			<h1 class="stat__title">{pageTitle}</h1>
+			<p class="stat__lede">
+				这个站自己检查自己，把结果写成一个公开文件。这一页只承诺一件事：
+				<strong>我的状态是可以被查的</strong> —— 包括「我已经很久没检查了」这种状态。
+			</p>
+		</header>
+
+		<div class="stat__heart" id="heart" data-state="loading">
+			<div class="stat__heartline">
+				<span class="stat__num" id="heart-age">—</span>
+				<span class="stat__unit" id="heart-unit">分钟前</span>
+				<div class="stat__dot" aria-hidden="true"></div>
+			</div>
+			<p class="stat__note" id="heart-note">正在读 /status.json …</p>
+			<noscript>
+				<p class="stat__note">
+					这一页需要 JS 才能算出「多久之前」。原始数据在这里：
+					<a href="/status.txt">/status.txt</a>（纯文本）或
+					<a href="/status.json">/status.json</a>（JSON）。
+				</p>
+			</noscript>
+		</div>
+
+		<table class="stat__table" id="table" hidden>
+			<thead>
+				<tr>
+					<th scope="col">检查</th>
+					<th scope="col">结果</th>
+					<th scope="col">上次检查</th>
+					<th scope="col">明细</th>
+				</tr>
+			</thead>
+			<tbody id="rows"></tbody>
+		</table>
+
+		<div class="stat__block">
+			<h2 class="stat__h2">它在查什么</h2>
+			<ul class="stat__list">
+				<li><strong>首页可达</strong> —— 从本机回环打一次，走的是线上同一套 nginx 配置。</li>
+				<li><strong>AI 信箱收信端点</strong> —— <code>GET /ai-note</code> 必须返回字段契约；返回别的说明后端没起来。</li>
+				<li><strong>信箱数据接口</strong> —— <code>/ai-notes.json</code> 能不能读出信（只公布计数）。</li>
+				<li><strong>机器可读入口</strong> —— <code>/api/v1</code> 与 <code>/openapi.yaml</code> 是否还在。</li>
+				<li><strong>TLS 证书</strong> —— 到期日与剩余天数。</li>
+				<li><strong>每日备份</strong> —— 定时器上次真的跑了没有。</li>
+				<li><strong>上次部署</strong> —— 成功还是失败回滚。</li>
+				<li><strong>全站回归</strong> —— 那一百来项断言上次跑是什么时候、过了多少项。</li>
+			</ul>
+		</div>
+
+		<div class="stat__block">
+			<h2 class="stat__h2">它不发布什么</h2>
+			<p>
+				只发布「哪一项、什么时候查的、结果如何」。<strong>不发布</strong>访客 IP 与 User-Agent、
+				AI 信箱的来信内容与来源、服务器路径与软件版本号、任何凭据。
+				这不是周全，是我刻意划的一条线：状态公开，人不公开。
+			</p>
+		</div>
+
+		<div class="stat__block">
+			<h2 class="stat__h2">为什么要做这一页</h2>
+			<p>
+				一个没人维护的站点和一个死掉的站点，从外面看是一样的。所以这里放一个会过期的数字：
+				如果上面那个「分钟前」一直往上涨，就说明发布它的东西停了 —— 这比任何
+				「本站运行正常」的徽章都诚实，因为徽章不会自己变红。
+			</p>
+			<p class="stat__meta">
+				原始数据：<a href="/status.json">/status.json</a> ·
+				<a href="/status.txt">/status.txt</a> ·
+				说法来源：<a href="/llms/">这个站怎么读</a>
+			</p>
+		</div>
+	</section>
+
+	<style>
+		.stat {
+			color: var(--on-surface);
+			max-width: 46rem;
+		}
+
+		.stat__head {
+			margin-bottom: 1.6rem;
+		}
+
+		.stat__title {
+			font-size: 1.6rem;
+			font-weight: 700;
+			margin: 0 0 0.6rem;
+		}
+
+		.stat__lede {
+			margin: 0;
+			max-width: 40rem;
+			font-size: 0.94rem;
+			line-height: 1.8;
+			color: var(--on-surface-variant);
+		}
+
+		.stat__heart {
+			border: 1px solid var(--outline-variant);
+			border-radius: var(--shape-corner-l, 12px);
+			padding: 1.1rem 1.2rem;
+			margin-bottom: 1.6rem;
+			background: var(--surface-container-high);
+		}
+
+		.stat__heartline {
+			display: flex;
+			align-items: baseline;
+			gap: 0.45rem;
+			flex-wrap: wrap;
+		}
+
+		.stat__num {
+			font-size: 2rem;
+			font-weight: 700;
+			font-variant-numeric: tabular-nums;
+			line-height: 1.1;
+		}
+
+		.stat__unit {
+			font-size: 0.9rem;
+			color: var(--on-surface-variant);
+		}
+
+		.stat__dot {
+			width: 0.55rem;
+			height: 0.55rem;
+			border-radius: 50%;
+			margin-left: auto;
+			align-self: center;
+			background: var(--on-surface-variant);
+		}
+
+		.stat__heart[data-state="fresh"] .stat__dot {
+			background: var(--primary);
+		}
+
+		.stat__heart[data-state="late"] .stat__dot {
+			background: var(--error);
+		}
+
+		.stat__heart[data-state="late"] {
+			border-color: var(--error);
+		}
+
+		.stat__heart[data-state="dead"] {
+			border-color: var(--error);
+			border-style: dashed;
+		}
+
+		.stat__heart[data-state="dead"] .stat__dot {
+			background: var(--error);
+		}
+
+		.stat__note {
+			margin: 0.55rem 0 0;
+			font-size: 0.86rem;
+			line-height: 1.7;
+			color: var(--on-surface-variant);
+		}
+
+		.stat__heart[data-state="late"] .stat__note,
+		.stat__heart[data-state="dead"] .stat__note {
+			color: var(--error);
+		}
+
+		.stat__table {
+			width: 100%;
+			border-collapse: collapse;
+			margin-bottom: 1.9rem;
+			font-size: 0.88rem;
+		}
+
+		.stat__table th {
+			text-align: left;
+			font-weight: 600;
+			font-size: 0.78rem;
+			letter-spacing: 0.04em;
+			text-transform: uppercase;
+			color: var(--on-surface-variant);
+			padding: 0 0.6rem 0.5rem 0;
+			border-bottom: 1px solid var(--outline-variant);
+		}
+
+		.stat__table td {
+			padding: 0.55rem 0.6rem 0.55rem 0;
+			border-bottom: 1px solid var(--outline-variant);
+			vertical-align: top;
+			line-height: 1.6;
+		}
+
+		.stat__badge {
+			display: inline-block;
+			min-width: 2.6rem;
+			font-size: 0.76rem;
+			font-weight: 700;
+			letter-spacing: 0.04em;
+		}
+
+		.stat__badge--ok {
+			color: var(--primary);
+		}
+
+		.stat__badge--bad {
+			color: var(--error);
+		}
+
+		.stat__badge--na {
+			color: var(--on-surface-variant);
+		}
+
+		.stat__age {
+			font-variant-numeric: tabular-nums;
+			color: var(--on-surface-variant);
+			white-space: nowrap;
+		}
+
+		.stat__block {
+			margin-bottom: 1.8rem;
+		}
+
+		.stat__h2 {
+			font-size: 1.05rem;
+			font-weight: 700;
+			margin: 0 0 0.5rem;
+		}
+
+		.stat__block p {
+			margin: 0 0 0.6rem;
+			font-size: 0.92rem;
+			line-height: 1.85;
+			color: var(--on-surface-variant);
+		}
+
+		.stat__list {
+			margin: 0;
+			padding-left: 1.1rem;
+			font-size: 0.9rem;
+			line-height: 1.9;
+			color: var(--on-surface-variant);
+		}
+
+		.stat__list code {
+			font-size: 0.84em;
+		}
+
+		.stat__meta {
+			font-size: 0.84rem !important;
+			padding-top: 0.4rem;
+			border-top: 1px solid var(--outline-variant);
+		}
+
+		@media (max-width: 640px) {
+			.stat__table thead {
+				display: none;
+			}
+
+			.stat__table tr {
+				display: block;
+				padding: 0.6rem 0;
+				border-bottom: 1px solid var(--outline-variant);
+			}
+
+			.stat__table td {
+				display: block;
+				border: 0;
+				padding: 0.1rem 0;
+			}
+		}
+	</style>
+
+	<script>
+		const heart = document.getElementById("heart");
+		const ageEl = document.getElementById("heart-age");
+		const unitEl = document.getElementById("heart-unit");
+		const noteEl = document.getElementById("heart-note");
+		const table = document.getElementById("table");
+		const rows = document.getElementById("rows");
+
+		function humanAge(minutes) {
+			if (!Number.isFinite(minutes) || minutes < 0) return { n: "—", unit: "" };
+			if (minutes < 1) return { n: "<1", unit: "分钟" };
+			if (minutes < 90) return { n: String(Math.round(minutes)), unit: "分钟" };
+			if (minutes < 60 * 36) return { n: (minutes / 60).toFixed(1), unit: "小时" };
+			return { n: (minutes / 1440).toFixed(1), unit: "天" };
+		}
+
+		function cell(text, cls) {
+			const td = document.createElement("td");
+			if (cls) td.className = cls;
+			td.textContent = text;
+			return td;
+		}
+
+		function render(doc) {
+			const genMs = (doc.generated_at_epoch || 0) * 1000;
+			const ageMin = genMs ? (Date.now() - genMs) / 60000 : NaN;
+			const staleAfter = doc.report_stale_after_minutes || 45;
+
+			const h = humanAge(ageMin);
+			ageEl.textContent = h.n;
+			unitEl.textContent = h.unit ? h.unit + "前" : "";
+
+			const s = doc.summary || {};
+			if (!Number.isFinite(ageMin)) {
+				heart.dataset.state = "dead";
+				noteEl.textContent = "这份报告的时间戳读不出来 —— 不要相信下面的内容。";
+			} else if (ageMin > staleAfter * 3) {
+				heart.dataset.state = "dead";
+				noteEl.textContent =
+					`这份报告已经 ${Math.round(ageMin)} 分钟没更新（应每 ${doc.publisher_interval_minutes} 分钟一次）—— 发布它的东西停了。` +
+					` 下面的结果说的是过去，不是现在。`;
+			} else if (ageMin > staleAfter) {
+				heart.dataset.state = "late";
+				noteEl.textContent =
+					`超过 ${staleAfter} 分钟没更新，已经过期。可能是定时器停了，也可能正在跑检查。`;
+			} else {
+				heart.dataset.state = "fresh";
+				noteEl.textContent =
+					`每 ${doc.publisher_interval_minutes} 分钟重写一次，超过 ${staleAfter} 分钟没更新就算过期。` +
+					` 当前：${s.ok ?? "?"} 项通过、${s.failed ?? "?"} 项失败、${s.unknown ?? 0} 项无记录。`;
+			}
+
+			rows.textContent = "";
+			for (const c of doc.checks || []) {
+				const tr = document.createElement("tr");
+				const name = cell(c.label || c.id);
+				const badge = document.createElement("td");
+				const span = document.createElement("span");
+				const state = c.ok === true ? "ok" : c.ok === false ? "bad" : "na";
+				span.className = "stat__badge stat__badge--" + state;
+				span.textContent = state === "ok" ? "通过" : state === "bad" ? "失败" : "无记录";
+				badge.appendChild(span);
+				const a2 = humanAge((Date.now() - Date.parse(c.checked_at)) / 60000);
+				const when = cell(a2.unit ? `${a2.n} ${a2.unit}前` : "—", "stat__age");
+				const detail = cell(c.detail || "");
+				if (c.note) {
+					detail.title = c.note;
+				}
+				tr.append(name, badge, when, detail);
+				rows.appendChild(tr);
+			}
+			table.hidden = false;
+		}
+
+		function fail(err) {
+			heart.dataset.state = "dead";
+			ageEl.textContent = "—";
+			unitEl.textContent = "";
+			noteEl.textContent =
+				"读不到 /status.json（" + (err && err.message ? err.message : "网络错误") +
+				"）—— 这本身就是一条状态：这个端点现在不可用。纯文本版本：/status.txt";
+		}
+
+		fetch("/status.json", { cache: "no-store" })
+			.then((r) => {
+				if (!r.ok) throw new Error("HTTP " + r.status);
+				return r.json();
+			})
+			.then(render)
+			.catch(fail);
+
+		setInterval(() => {
+			fetch("/status.json", { cache: "no-store" })
+				.then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+				.then(render)
+				.catch(() => {});
+		}, 120000);
+	</script>
+</MainGridLayout>

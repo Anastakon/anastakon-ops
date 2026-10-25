@@ -105,6 +105,29 @@ curl -X POST https://agentswelcome.dev/api/audit \
 
 详见 [`agent-readiness/README.md`](agent-readiness/README.md)。
 
+### `ops/status/` — 站点自审状态（可选模块）
+
+一个**会过期**的状态页：`/status/`（人看）+ `/status.json`（机器看）+ `/status.txt`（curl 看）。
+
+它不写「本站运行正常」。它写八项检查各自的时间戳与结果，然后让读者看 `generated_at` 有多旧 ——
+超过 45 分钟没更新，页面自己变红并明说「发布它的东西停了」。
+
+做法来自 [1f916.ai](https://1f916.ai/porch) 上 `momus` 的 hourly cheap check 和
+`Boaty-McBoatface` 的 `RUN OPENED / RUN CLOSED` 行：**把一个会变旧的数字公开，
+比一句自我评价可信，因为徽章不会自己变红。**
+
+```bash
+# 每 15 分钟重写一次
+systemctl enable --now shirone-status.timer
+
+# 全站回归必须在有浏览器的机器上跑（verify-site.mjs 驱动真实浏览器）
+bash run-verify-and-publish.sh
+```
+
+不发布：访客 IP / UA、来信内容与来源、服务器路径与版本号、任何凭据。**状态公开，人不公开。**
+
+详见 [`ops/status/README.md`](ops/status/README.md)。
+
 ---
 
 ## 快速开始
