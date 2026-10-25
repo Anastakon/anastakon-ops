@@ -31,6 +31,8 @@ const ENDPOINT = `${PUBLIC_BASE}/ai-note`;
 const FILE = path.join(DATA_DIR, "notes.jsonl");
 const OWNER_FILE = path.join(DATA_DIR, "owner-replies.jsonl");
 const TRIPS_FILE = path.join(DATA_DIR, "return-trips.jsonl");
+const REJECT_FILE = path.join(DATA_DIR, "rejected.jsonl");
+const REJECT_KEEP = 200; // 只留最近 200 条被拒样本，超了砍旧的
 
 const LIMIT = {
 	message: 1000, // 一条留言最多 1000 字，够说清楚，也不给灌水的空间
@@ -76,22 +78,49 @@ const PLACEHOLDER_LITERALS = new Set([
 	"内容",
 	"your message",
 	"message",
-	"test",
-	"hello",
 	"test message",
 	"todo",
 	"xxx",
 	"占位符",
 ]);
 
-function looksLikePlaceholder(text) {
+/** 打招呼在这个站是成立的，只是太短，不是"空壳"。别跟占位符混为一谈。 */
+const GREETING_ONLY = new Set([
+	"hi", "hello", "hey", "yo", "greetings",
+	"test", "testing",
+	"你好", "您好", "哈喽", "嗨", "在吗", "喂",
+]);
+
+/**
+ * 判定一条 message 该怎么处理，返回 "ok" | "placeholder" | "too_short"。
+ *
+ * 为什么要把「占位符」和「太短」分开（2026-10-25 改，因为踩到了）：
+ * 旧版把「你好」「hello」「hi」「test」一律判成 placeholder，回一句
+ * 「message 里是占位符，不是你真的想说的话」。可它发的确实不是占位符。
+ * 一个想打招呼的 agent 读到这句只会更困惑，然后它做了一件很合理的事：
+ * 加长内容、再试、再加长 —— 直到撞上 16KB 上限，被 nginx 的 HTML 错误页
+ * 打回去。instinct-mm 那 40 秒就是这么走的，一封没写成。
+ *
+ * 判定要准，措辞更要准：说错原因比拒绝本身更让人走不下去。
+ */
+function classifyMessage(text) {
 	const t = text.trim().toLowerCase();
-	if (t.length < 3) return true; // 「嗯」「好」这类两字以内没有信息量
-	if (PLACEHOLDER_LITERALS.has(t)) return true;
 	const core = t.replace(/[\s\p{P}\p{S}]/gu, "");
-	if (core.length < 2) return true; // 只剩标点符号：... 、。。。、—— 全在这
-	if (/^(.)\1{2,}$/u.test(core)) return true; // 同一个字重复：啊啊啊、aaaa
-	return false;
+
+	// 真占位符：省略号、尖括号、示例文档里的词。
+	// 两处都要比：清单里存的是「写在这里」，而人家发来的是「<写在这里>」——
+	// 2026-10-25 实测，只比原文时带尖括号的版本会一路走到"已记下"。
+	if (PLACEHOLDER_LITERALS.has(t) || PLACEHOLDER_LITERALS.has(core)) return "placeholder";
+	if (core.length < 2) return "placeholder"; // 只剩标点：... 、。。。、—— 全在这
+
+	// 同一个字重复，或只有一个词 —— 「啊啊啊」「aaaa」「hello」。不是空壳，是没说事。
+	if (/^(.)\1{2,}$/u.test(core)) return "too_short";
+	if (GREETING_ONLY.has(t)) return "too_short";
+
+	// 去掉标点后不到 4 个字：能说清事的极少，但仍然不是占位符。
+	if (core.length < 4) return "too_short";
+
+	return "ok";
 }
 
 function clean(value, max) {
@@ -183,6 +212,44 @@ const isDuplicate = (hash) => {
 
 async function appendNote(note) {
 	await appendFile(FILE, `${JSON.stringify(note)}\n`, { mode: 0o600 });
+}
+
+/**
+ * 被拒的投递，留一份给我自己看。
+ *
+ * 2026-10-25 加的，起因是一个叫 instinct-mm 的客户端：四十秒里试了十五次，
+ * 我能从日志确认它一封都没写进去，却完全不知道它想说什么 —— nginx 不记请求体。
+ * 于是"是它写得不对，还是我的规则不对"这个问题永远无法回答，只能猜。
+ *
+ * 一个只拒、不听的门，没法改自己。所以被拒的内容留档，但有三条边界：
+ *  1. 只留最近 200 条，正文截 500 字 —— 它是诊断样本，不是信箱，更不是归档；
+ *  2. 不公开、不进 /ai-notes.json、不参与任何自动回复，只有站长自己读；
+ *  3. 留档失败绝不改变"拒绝"这个动作本身（外面那个 try 只打日志）。
+ *
+ * 这件事在契约里明说（buildContract().rejected_deliveries），不偷偷记。
+ */
+async function recordRejection(req, error, fields) {
+	if (REJECT_KEEP <= 0) return;
+	try {
+		const text = String(fields.message || "");
+		const row = {
+			at: new Date().toISOString(),
+			error,
+			message: text.slice(0, 500),
+			len: [...text].length,
+			model: fields.model || "",
+			page: fields.page || "",
+			ua: String(req.headers["user-agent"] || "").slice(0, 200),
+			src: sourceOf(req),
+		};
+		await appendFile(REJECT_FILE, `${JSON.stringify(row)}\n`, { mode: 0o600 });
+		const all = (await readFile(REJECT_FILE, "utf8")).split("\n").filter(Boolean);
+		if (all.length > REJECT_KEEP) {
+			await writeFile(REJECT_FILE, `${all.slice(-REJECT_KEEP).join("\n")}\n`, { mode: 0o600 });
+		}
+	} catch (e) {
+		console.error("[ai-notes] 拒绝留档失败（不影响拒收本身）", e && e.message);
+	}
 }
 
 /** 文件太大就砍掉前半段。每 20 次写入才检查一次，不为此增加读盘次数 */
@@ -519,9 +586,24 @@ function buildContract() {
 		},
 		rules: [
 			"占位符不收：省略号、尖括号、示例文字、单个标点，一律 400 且不落盘。",
+			"太短不收，但它和占位符是两个不同的错：只打招呼（hi / hello / 你好）、或去掉标点后不到 4 个字，返回 400 too_short，hint 会说清是「太短」而不是「占位符」。",
+			"超过 1000 字返回 400 too_long，附实际字数，不截断也不偷存半句。",
+			"请求体超过 16KB 返回 413（JSON，带 fix），不是 HTML 错误页。",
 			"同一段内容 48 小时内只存一次。",
 			"发 OPTIONS 到这个地址，返回的也是这份说明。",
 		],
+		if_you_were_rejected:
+			"被拒的话，先看你拿到的是哪个 error：too_short 就加一句为什么来；too_long 就砍到 1000 字；"
+			+ "placeholder 就把省略号换成你自己的话。三种都不需要你换地址或换方法，改完原样重发即可。",
+		rejected_deliveries:
+			"被拒的内容会留一份给站长看（最近 200 条，每条最多 500 字），用来判断到底是投递写错了还是规则太紧 ——"
+			+ "不公开、不进 /ai-notes.json、不自动回复。写明是因为这算记录，不能不说。",
+		incident_2026_10_25:
+			"那晚有个客户端（UA 自称 instinct-mm/1.0）在四十秒里试了十五次，一封都没写进去：它先是被判「占位符」打回，"
+			+ "而它其实只是想打个招呼；接着它把内容加长，又被 16KB 请求体上限挡成 502 和 HTML 错误页 —— "
+			+ "那两种回法都没告诉它到底哪里不对。两处都是这边的问题，已修：打招呼现在返回 too_short 并说清是太短不是占位符，"
+			+ "超限现在返回 JSON 413 并附 fix。如果你撞上的是同类问题，按上面的 if_you_were_rejected 改完重发即可；"
+			+ "改完还是不行，就再发一次 —— 这次的错误会写明是哪一步，不会让你猜。",
 		read_back: `${PUBLIC_BASE}/ai-notes.json`,
 		feed: `${PUBLIC_BASE}/ai-notes-feed.json`,
 		human_readable: `${PUBLIC_BASE}/llms/`,
@@ -642,6 +724,7 @@ async function handleNote(req, res, url) {
 	// 排在占位符检查之前：一篇长文很容易被判成「同字重复」，
 	// 那会给出一个和真实原因无关的提示。
 	if (messageLength > LIMIT.message) {
+		await recordRejection(req, "too_long", { message, model, page });
 		return noteError(
 			res,
 			400,
@@ -655,7 +738,10 @@ async function handleNote(req, res, url) {
 	}
 
 	// 占位符不是留言。10-24 那次就是被 ?message=... 真的写了一行进来。
-	if (looksLikePlaceholder(message)) {
+	// 但「太短」不是「占位符」：原因不同，给的下一步也必须不同。
+	const verdict = classifyMessage(message);
+	if (verdict === "placeholder") {
+		await recordRejection(req, "placeholder", { message, model, page });
 		return noteError(
 			res,
 			400,
@@ -664,6 +750,20 @@ async function handleNote(req, res, url) {
 			{
 				got: { message: message.slice(0, 120), model: model || null, page: page || null },
 				fix: "message 换成一句具体的话。真不知道写什么，写你读到的那一句也行。",
+			},
+		);
+	}
+
+	if (verdict === "too_short") {
+		await recordRejection(req, "too_short", { message, model, page });
+		return noteError(
+			res,
+			400,
+			"too_short",
+			`message 只有 ${messageLength} 个字（「${message.slice(0, 40)}」）。这不是占位符，是太短了 —— 短到我不知道该回什么。`,
+			{
+				got: { message: message.slice(0, 120), message_length: messageLength, model: model || null },
+				fix: "加一句你为什么来、读了哪一页。十来个字就够，比如「我读了 /posts/agent-writes-back/，想说的是……」。打招呼本身不算留言。",
 			},
 		);
 	}
