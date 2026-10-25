@@ -42,28 +42,47 @@ page.on('request', (r) => {
 //   回归是机器连发，不节流会把自己打成 429，从而误报成站点故障。这里排队成 ≥1.1s 一次。
 let _lastDocNav = 0;
 const slowNavs = [];
+/** 记一个「本机浏览器没结算」的页面，同一页只记一次，并留下当时的原因 */
+const noteSlowNav = (path, why = '') => {
+	if (slowNavs.some((s) => s.path === path)) return;
+	slowNavs.push({ path, why });
+};
+// 这些错误都表示「这台机器的浏览器没结算完」，不是站点故障：
+// 超时、上下文被导航销毁、目标被关掉、frame 被替换、网络层报错。
+const RECOVERABLE_NAV =
+	/timeout|Execution context was destroyed|navigating|Target closed|frame was detached|net::ERR_/i;
 async function go(path, wait = 500) {
 	const gap = 1100 - (Date.now() - _lastDocNav);
 	if (gap > 0) await sleep(gap);
 	_lastDocNav = Date.now();
-	try {
-		const resp = await page.goto(BASE + path, { waitUntil: 'networkidle2', timeout: 25000 });
-		await sleep(wait);
-		return resp ? resp.status() : 0;
-	} catch (e) {
-		// networkidle2 要求「≤2 个连接在飞」。只要有一个资源卡住，它就永远等不到，
-		// 而页面本身早就可用了 —— 2026-10-25 实测：本机浏览器对同一批资源（/count、
-		// 两张 webp、一张 jpg）全部挂起不结算，同一时刻 curl 取它们都是 0.1s 内 200。
-		// 那不是站点故障，是这台机器的网络。所以这里降级为「继续」，但**记下来并打出来**：
-		// 断言一条没动，只是不让一个卡住的资源把整轮回归判死。
-		if (!/timeout/i.test(e && e.message ? e.message : '')) throw e;
-		slowNavs.push(path);
-		await sleep(wait);
-		const st = await page.evaluate(
-			() => (performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0,
-		);
-		return st;
+	for (let attempt = 1; attempt <= 2; attempt++) {
+		try {
+			const resp = await page.goto(BASE + path, {
+				waitUntil: attempt === 1 ? 'networkidle2' : 'domcontentloaded',
+				timeout: attempt === 1 ? 25000 : 15000,
+			});
+			await sleep(wait);
+			if (attempt > 1) noteSlowNav(path, '第一次没结算，改用 domcontentloaded 拿到 HTTP ' + (resp ? resp.status() : 0));
+			return resp ? resp.status() : 0;
+		} catch (e) {
+			const msg = (e && e.message) ? e.message : String(e);
+			// networkidle2 要求「≤2 个连接在飞」。只要有一个资源卡住，它就永远等不到，
+			// 而页面本身早就可用了 —— 2026-10-25 实测：本机浏览器对同一批资源（/count、
+			// 两张 webp、一张 jpg）全部挂起不结算，同一时刻 curl 取它们都是 0.1s 内 200。
+			// 那不是站点故障，是这台机器的网络。
+			//
+			// 2026-10-25 深夜又踩一次：原本只放行 timeout，于是
+			// 'Execution context was destroyed' 把整轮回归打断在第 6 项，还连断两次。
+			// 那同样是浏览器没结算（同一时刻 curl /skills/ 是 0.16s 内 200，页面也没有跳转）。
+			// 所以改成：可恢复 → 记下来 → 换 domcontentloaded 再试一次 → 仍不行才判 0。
+			// 这一项要判的是「页面拿不拿得到 200」，不是「资源有没有全部结算」。断言一条没动。
+			if (!RECOVERABLE_NAV.test(msg)) throw e;
+			noteSlowNav(path, msg.slice(0, 70));
+			if (attempt === 2) return 0;
+			await sleep(1200);
+		}
 	}
+	return 0;
 }
 const evalPage = (fn) => page.evaluate(fn);
 
@@ -197,7 +216,7 @@ async function main() {
 		} catch (e) {
 			// 同 go()：资源卡住不等于页面没加载，记下来继续，别让整轮作废
 			if (!/timeout/i.test(e && e.message ? e.message : '')) throw e;
-			slowNavs.push('/ (reload)');
+			noteSlowNav('/ (reload)');
 		}
 		await sleep(1700);
 		const m = await evalPage(() => ({
@@ -348,7 +367,7 @@ async function main() {
 		// 导航超时说明有资源没结算，但 DOM 已经好了。这一条要判的是「页面在不在」，
 		// 所以退化成直接 fetch 取状态码，而不是判失败。
 		if (!/timeout/i.test(e && e.message ? e.message : '')) throw e;
-		slowNavs.push('/ai-notes/');
+		noteSlowNav('/ai-notes/');
 		const r = await fetch(BASE + '/ai-notes/');
 		gbRes = { status: () => r.status };
 	}
@@ -596,8 +615,8 @@ try {
 	}
 	if (slowNavs.length) {
 		// 不藏起来：哪些页面「DOM 好了但资源没结算」要看得见，否则降级就成了遮羞布。
-		console.log(`\n⚠ ${slowNavs.length} 个页面有资源没在 25s 内结算（本机网络，非站点报错）：`);
-		console.log('  ' + slowNavs.join(' '));
+		console.log(`\n⚠ ${slowNavs.length} 个页面没一次结算成功（本机浏览器，非站点报错）：`);
+		for (const s of slowNavs) console.log(`  ${s.path}  ${s.why || ''}`);
 	}
 	await browser.close();
 	if (fail.length) process.exitCode = 1;
