@@ -81,6 +81,11 @@ async function main() {
 	chk('canonical 唯一', home.canonCount === 1, home.canonCount + ' 个');
 	chk('首页有 h1', home.h1 >= 1, home.h1 + ' 个');
 	chk('「正在玩」已移除', !home.hasPlaying);
+	// live.json 是页面脚本在加载后自行发起的，跳转完成 ≠ 它已经发出。
+	// 不等待直接断言，网络一慢就统计到 0 次 —— 站点完全正常，断言却红了。
+	await page.waitForResponse((r) => r.url().includes('/live.json'), { timeout: 3000 }).catch(() => {});
+	// 新版 puppeteer 移除了 page.waitForTimeout，用原生定时器
+	await new Promise((r) => setTimeout(r, 300));
 	chk('首页 live.json 只请求 1 次', liveHits.length === 1, liveHits.length + ' 次');
 
 	console.log('\n[3] 关于页');
@@ -271,12 +276,18 @@ async function main() {
 
 	console.log('\n[10] 页面抓取限速（只限文档，不限资源）');
 	// 目的：允许慢爬，不允许「几秒抓完整站」。用页面内 fetch 连发模拟采集器，不是 curl。
+	// 必须真的并发。原来写成 for + await，网络一慢就摊成每秒不到一个请求，
+	// 连 1r/s 都打不满，429 永远不出现 —— 断言靠运气过，不是靠限速生效。
 	const burst = await page.evaluate(async () => {
+		const rs = await Promise.all(
+			Array.from({ length: 30 }, (_, i) =>
+				fetch('/?rl=' + i, { cache: 'no-store' })
+					.then((r) => r.status)
+					.catch(() => 0),
+			),
+		);
 		const codes = {};
-		for (let i = 0; i < 30; i++) {
-			const r = await fetch('/?rl=' + i, { cache: 'no-store' });
-			codes[r.status] = (codes[r.status] || 0) + 1;
-		}
+		for (const c of rs) codes[c] = (codes[c] || 0) + 1;
 		return codes;
 	});
 	chk('连发 30 个页面会出现 429', (burst[429] || 0) > 0, JSON.stringify(burst));

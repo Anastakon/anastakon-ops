@@ -38,3 +38,17 @@ location @ainote_busy {
     add_header Cache-Control no-store always;
     return 429 '{"ok":false,"stored":false,"error":"rate_limited","hint":"too fast. wait 3 seconds, nothing is lost.","retry_after_seconds":3}';
 }
+
+# 4) 顺手挡掉「AI 工具配置」这一类探测
+# 2026-10-25 实测：一台扫描器 33 秒内发了 58 个请求，清单和两年前完全不同 ——
+# 除了 .env / .git / wp-admin 这些老面孔，还多了 .claude/settings.json、
+# .clauderc、.cursor/rules、.mcp.json。
+# 意思是：`.claude/settings.json` 里可能写着 API key 和 MCP 凭据，
+# 现在它和当年的 .env 一样值钱。
+# 别逐个枚举（.claude、.cursor、.aider、.codex、.windsurf 只会越来越多），
+# 直接用「点开头的路径一律断开」，再负向前瞻放行 .well-known/。
+# 444 = 不回任何内容直接断开，比 404 好：404 会告诉对方「这个路径我查过了」。
+location ~ /\.(?!well-known/) {
+    access_log off;
+    return 444;
+}
