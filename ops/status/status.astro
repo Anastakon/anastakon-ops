@@ -48,17 +48,15 @@ const pageDescription =
 			</noscript>
 		</div>
 
-		<table class="stat__table" id="table" hidden>
-			<thead>
-				<tr>
-					<th scope="col">检查</th>
-					<th scope="col">结果</th>
-					<th scope="col">上次检查</th>
-					<th scope="col">明细</th>
-				</tr>
-			</thead>
-			<tbody id="rows"></tbody>
-		</table>
+		<div class="stat__list2" id="list" hidden>
+			<div class="stat__row stat__row--head" aria-hidden="true">
+				<span class="stat__name">检查</span>
+				<span class="stat__badge">结果</span>
+				<span class="stat__age">上次检查</span>
+				<span class="stat__detail">明细</span>
+			</div>
+			<div id="rows"></div>
+		</div>
 
 		<div class="stat__block">
 			<h2 class="stat__h2">它在查什么</h2>
@@ -98,7 +96,10 @@ const pageDescription =
 		</div>
 	</section>
 
-	<style>
+	{/* is:global 是必须的：下面的行是 JS 运行时创建的，不带 Astro 的 scope 属性，
+	    用普通 <style> 那些 .stat__row / .stat__badge 规则一条都不会命中。
+	    所有选择器都以 .stat__ 开头，不会外溢到别处。 */}
+	<style is:global>
 		.stat {
 			color: var(--on-surface);
 			max-width: 46rem;
@@ -191,37 +192,41 @@ const pageDescription =
 			color: var(--error);
 		}
 
-		.stat__table {
-			width: 100%;
-			border-collapse: collapse;
+		.stat__list2 {
 			margin-bottom: 1.9rem;
 			font-size: 0.88rem;
 		}
 
-		.stat__table th {
-			text-align: left;
-			font-weight: 600;
-			font-size: 0.78rem;
+		.stat__row {
+			display: grid;
+			grid-template-columns: 8.2rem 3.4rem 6.6rem minmax(0, 1fr);
+			grid-template-areas: "name badge age detail";
+			gap: 0.5rem;
+			align-items: baseline;
+			padding: 0.5rem 0;
+			border-bottom: 1px solid var(--outline-variant);
+		}
+
+		.stat__row--head {
+			padding-top: 0;
+			font-size: 0.74rem;
 			letter-spacing: 0.04em;
 			text-transform: uppercase;
 			color: var(--on-surface-variant);
-			padding: 0 0.6rem 0.5rem 0;
-			border-bottom: 1px solid var(--outline-variant);
 		}
 
-		.stat__table td {
-			padding: 0.55rem 0.6rem 0.55rem 0;
-			border-bottom: 1px solid var(--outline-variant);
-			vertical-align: top;
-			line-height: 1.6;
+		.stat__name {
+			grid-area: name;
+			font-weight: 600;
+			line-height: 1.5;
 		}
 
 		.stat__badge {
-			display: inline-block;
-			min-width: 2.6rem;
+			grid-area: badge;
 			font-size: 0.76rem;
 			font-weight: 700;
 			letter-spacing: 0.04em;
+			white-space: nowrap;
 		}
 
 		.stat__badge--ok {
@@ -237,9 +242,17 @@ const pageDescription =
 		}
 
 		.stat__age {
+			grid-area: age;
 			font-variant-numeric: tabular-nums;
 			color: var(--on-surface-variant);
 			white-space: nowrap;
+		}
+
+		.stat__detail {
+			grid-area: detail;
+			color: var(--on-surface-variant);
+			line-height: 1.6;
+			overflow-wrap: anywhere;
 		}
 
 		.stat__block {
@@ -278,20 +291,22 @@ const pageDescription =
 		}
 
 		@media (max-width: 640px) {
-			.stat__table thead {
+			.stat__row--head {
 				display: none;
 			}
 
-			.stat__table tr {
-				display: block;
+			.stat__row {
+				grid-template-columns: 1fr auto;
+				grid-template-areas:
+					"name badge"
+					"age age"
+					"detail detail";
+				gap: 0.18rem;
 				padding: 0.6rem 0;
-				border-bottom: 1px solid var(--outline-variant);
 			}
 
-			.stat__table td {
-				display: block;
-				border: 0;
-				padding: 0.1rem 0;
+			.stat__detail {
+				margin-top: 0.2rem;
 			}
 		}
 	</style>
@@ -301,7 +316,7 @@ const pageDescription =
 		const ageEl = document.getElementById("heart-age");
 		const unitEl = document.getElementById("heart-unit");
 		const noteEl = document.getElementById("heart-note");
-		const table = document.getElementById("table");
+		const table = document.getElementById("list");
 		const rows = document.getElementById("rows");
 
 		function humanAge(minutes) {
@@ -313,10 +328,10 @@ const pageDescription =
 		}
 
 		function cell(text, cls) {
-			const td = document.createElement("td");
-			if (cls) td.className = cls;
-			td.textContent = text;
-			return td;
+			const el = document.createElement("span");
+			if (cls) el.className = cls;
+			el.textContent = text;
+			return el;
 		}
 
 		function render(doc) {
@@ -350,22 +365,25 @@ const pageDescription =
 
 			rows.textContent = "";
 			for (const c of doc.checks || []) {
-				const tr = document.createElement("tr");
-				const name = cell(c.label || c.id);
-				const badge = document.createElement("td");
-				const span = document.createElement("span");
+				const row = document.createElement("div");
+				row.className = "stat__row";
+
+				const name = cell(c.label || c.id, "stat__name");
+
 				const state = c.ok === true ? "ok" : c.ok === false ? "bad" : "na";
-				span.className = "stat__badge stat__badge--" + state;
-				span.textContent = state === "ok" ? "通过" : state === "bad" ? "失败" : "无记录";
-				badge.appendChild(span);
+				const badge = cell(
+					state === "ok" ? "通过" : state === "bad" ? "失败" : "无记录",
+					"stat__badge stat__badge--" + state,
+				);
+
 				const a2 = humanAge((Date.now() - Date.parse(c.checked_at)) / 60000);
 				const when = cell(a2.unit ? `${a2.n} ${a2.unit}前` : "—", "stat__age");
-				const detail = cell(c.detail || "");
-				if (c.note) {
-					detail.title = c.note;
-				}
-				tr.append(name, badge, when, detail);
-				rows.appendChild(tr);
+
+				const detail = cell(c.detail || "", "stat__detail");
+				if (c.note) detail.title = c.note;
+
+				row.append(name, badge, when, detail);
+				rows.appendChild(row);
 			}
 			table.hidden = false;
 		}
