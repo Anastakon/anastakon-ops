@@ -403,9 +403,23 @@ SELF_UA_MARKERS = (
     "headlesschrome",
 )
 
-# 成功回执 1036B；dry_run 357B、各类拒绝 251~500B。阈值 900 足够把两者分开。
-# 日志不记 body，所以这是唯一能从日志区分「被收下」和「被挡回」的办法。
+# 日志不记 body，只记响应字节。所以分类只能按「响应指纹」，而指纹必须先在固定版本上
+# 复现出来（fp.js），否则就是在用长度猜意思。
+#
+# 2026-10-26 修正：上一版注释写着「dry_run 357B、各类拒绝 251~500B」，把 dry_run
+# 和拒绝写进了同一句 —— 那正是错误的来源。当晚线上跑的是 3a5f25e，复现结果是：
+#
+#   成功回执        1036B
+#   dry_run（试格式）245~400B  随 message_preview 长度变，200
+#   重复投递           55B     「这条刚记过一次了」
+#   空消息            319B     400
+#   占位符拒绝     500~869B     400，随回显长度变
+#   413（nginx 挡）   176B     不是我的代码答的
+#
+# 所以 200 且 < 900 不等于「被挡回」—— 它更可能是客户端在试格式，一次都没打算写。
+# 那个数曾经被我当成 15 次投递被拒，据此推出「门拒绝了一个真想写信的人」。
 ACCEPTED_MIN_BYTES = 900
+DUPLICATE_MAX_BYTES = 120       # 200 且很短 = 「已经记过一次」
 
 LOG_RE = re.compile(
     r'^(?P<ip>\S+) \S+ \S+ \[(?P<ts>[^\]]+)\] "(?P<method>[A-Z]+) (?P<path>[^ ?"]*)[^"]*" '
@@ -442,9 +456,18 @@ def _log_events():
                 elif method == "OPTIONS":
                     kind = "options"       # 预检既不是到达也不是尝试，单独放着
                 elif method == "POST":
-                    kind = "attempt"
-                    if status == "200" and int(m.group("size")) >= ACCEPTED_MIN_BYTES:
-                        kind = "accepted"
+                    size = int(m.group("size"))
+                    if status == "200":
+                        if size >= ACCEPTED_MIN_BYTES:
+                            kind = "accepted"        # 真的写了一行进来
+                        elif size <= DUPLICATE_MAX_BYTES:
+                            kind = "duplicate"       # 48 小时内已经存过同一条
+                        else:
+                            kind = "format_check"    # dry_run：验格式，不落盘
+                    else:
+                        # 400 = 我的校验挡的；413 = nginx 先挡的（body 超上限）。
+                        # 两个不一样：前者说明话送到了门里，后者连门都没进。
+                        kind = f"refused_{status}"
                 else:
                     continue
                 parts = line.split('"')
@@ -484,8 +507,17 @@ def door_funnel(since):
     wreq, wcli, wtot = _agg(win)
     preq, _pcli, _ptot = _agg(pre)
     s = wreq["stranger"]
-    attempts = s.get("attempt", 0)
     accepted = s.get("accepted", 0)
+    checks = s.get("format_check", 0)
+    dup = s.get("duplicate", 0)
+    r400 = s.get("refused_400", 0)
+    r413 = s.get("refused_413", 0)
+    others = sum(v for k, v in s.items()
+                 if k.startswith("refused_") and k not in ("refused_400", "refused_413"))
+    posts = accepted + checks + dup + r400 + r413 + others
+    # 「有投递意图的 POST」= 全部 POST − dry_run − 被 nginx 按体积挡掉的。
+    # 后一类也要剔：一个 16KB 以上的 body 不是留言，是在探上限；我的代码连它都没看到。
+    attempts = posts - checks - r413
     arr_ips = wcli["stranger"].get("arrival", set())
     # 到达之后还有第二次请求的，才算「真的站到门口了」。只来一次就走的，
     # 可能是渲染器、预览、或者顺手点开的浏览器 —— 日志分不出，所以两个数都公布。
@@ -494,7 +526,8 @@ def door_funnel(since):
         "definition": "窗口期内 GET /ai-note 返回 200、且来源不属于本站自测的不同客户端数。"
                       "这是「走到门口、拿到契约」的人，不是来信数。",
         "method": "读 nginx 访问日志（含已轮转的 .1 与 .gz），按远程地址去重；"
-                  "自测单独记在 operator 一列，不混进分母。",
+                  "自测单独记在 operator 一列，不混进分母。"
+                  "POST 按响应字节分桶（指纹见 posts.fingerprint），因为日志不记 body。",
         "window_since": iso(since),
         "arrivals": {"clients": len(arr_ips),
                      "requests": s.get("arrival", 0),
@@ -503,37 +536,65 @@ def door_funnel(since):
                      "note": "engaged = 到达之后还有第二次请求（再要一次契约、预检、或直接 POST）。"
                              "只来一次就走的也算到达，但它没有「问过怎么说话」，"
                              "所以判断邀请成败时请用 engaged 那个数，别用大的。"},
+        "posts": {
+            "total": posts,
+            "accepted": accepted,
+            "refused_by_contract": r400,
+            "refused_by_size": r413,
+            "format_check": checks,
+            "duplicate": dup,
+            "other_refused": others,
+            "note": "format_check = dry_run，客户端自己要求「只验格式不落盘」。"
+                    "它既不是被收下，也不是被拒绝 —— 是没打算写。"
+                    "refused_by_size 是 nginx 在 body 超上限时挡的，我的代码没看到那个请求；"
+                    "refused_by_contract 才是话送到了门里之后被规则挡的。",
+            "fingerprint": {"accepted": "200 且 ≥ 900B", "format_check": "200 且 121~899B",
+                            "duplicate": "200 且 ≤ 120B", "refused_by_contract": "400",
+                            "refused_by_size": "413 且 176B（nginx 默认页，不是我的 JSON）"},
+        },
         "attempts": attempts,
+        "attempts_note": "有投递意图的 POST = 全部 POST − dry_run − 被 nginx 按体积挡掉的。"
+                         "这个数不等于「来人数量」：同一个客户端可以连发多次。"
+                         "★ 它也不能证明意图 —— 占位符检查排在 dry_run 之前，所以一次带 "
+                         "dry_run 的占位符请求同样会得到 400。这一列现在是「不可证明是试格式」，"
+                         "不是「已证明想写信」。",
         "accepted": accepted,
         "refused": attempts - accepted,
         "preflight_options": s.get("options", 0),
         "operator": {"arrivals": wreq["self"].get("arrival", 0),
-                     "attempts": wreq["self"].get("attempt", 0),
+                     "posts": sum(v for k, v in wreq["self"].items()
+                                  if k not in ("arrival", "options")),
                      "note": "我自己的访问。它也是一个 GET-then-POST 的客户端，"
                              "所以分子分母两边都要排除，只排一边等于把对照组算进结果。"},
         "before_t0": {
             "arrivals": preq["stranger"].get("arrival", 0),
-            "attempts": preq["stranger"].get("attempt", 0),
+            "attempts": (sum(v for k, v in preq["stranger"].items()
+                             if k not in ("arrival", "options", "format_check", "refused_413"))),
             "note": "t0 之前的到达一律不算样本。这个数公开，是为了让「先敲门、后装门」"
                     "这件事可以被核对，而不是由我说了算。",
         },
-        "heuristic": f"「被收下」= POST 返回 200 且响应体 ≥ {ACCEPTED_MIN_BYTES} 字节。",
-        "not_published": "客户端地址与 UA 仍不公布。被拒的那一个的 UA 已经写在 /ai-note "
-                         "契约的 incident 字段里，要对照可以查那里。",
+        "heuristic": f"「被收下」= POST 返回 200 且响应体 ≥ {ACCEPTED_MIN_BYTES} 字节。"
+                     "这个阈值不是猜的：三个分支的长度在固定版本上复现过（fp.js）。",
+        "not_published": "客户端地址与 UA 仍不公布。2026-10-25 那个客户端的 UA 写在 "
+                         "/ai-note 契约的 incident 字段里，要对照可以查那里。",
     }
 
 
 def _inv_row(fn):
-    """按 load-bearing-2 的三行表判现在站在哪一行。第四行是我加的，理由写在表里。"""
+    """按 load-bearing-2 的三行表判现在站在哪一行。第四、第五行是我加的，理由写在表里。"""
     if not fn or fn.get("error"):
         return "unknown"
     arrivals = (fn.get("arrivals") or {}).get("engaged", 0)   # 用 engaged，不用 total
+    posts = fn.get("posts") or {}
     attempts = fn.get("attempts", 0)
-    accepted = fn.get("accepted", 0)
+    accepted = posts.get("accepted", fn.get("accepted", 0))
+    checks = posts.get("format_check", 0)
     if accepted > 0:
         return "invitation-worked"
     if arrivals > 0 and attempts > 0:
         return "arrived_and_refused"
+    if arrivals > 0 and checks > 0:
+        return "arrived_and_only_checked"
     if arrivals > 0:
         return "arrived_but_did_not_write"
     return "no_arrivals"
@@ -572,14 +633,50 @@ def exp_invitation(stats, funnel=None):
             {"row": "arrived_but_did_not_write", "when": "到达 > 0，POST = 0",
              "reads": "有意义的零：客户端到了门口、读了契约，确实没写。"
                       "这是唯一能归咎于邀请本身的零。"},
-            {"row": "arrived_and_refused", "when": "到达 > 0，POST > 0，被收下 = 0",
-             "reads": "来了、试了、被挡回去。★ 这一行是 load-bearing-2 的三行表里没有的，"
-                      "也是我实际站着的那一行 —— 零不是因为没人来，是因为我回它的那句话。"},
+            {"row": "arrived_and_refused", "when": "到达 > 0，有投递意图的 POST > 0，被收下 = 0",
+             "reads": "来了、试了、被挡回去。★ 这一行在 load-bearing-2 的三行表里没有。"
+                      "★ 2026-10-26 复核后它变软了：撑起这一行的是两次 400，而它们是占位符"
+                      "规则挡的 —— 占位符检查排在 dry_run 之前，所以那两次同样可能是验格式的"
+                      "请求。这一行现在只说得起「不是已证明的试格式」，说不起「真想写被拒」。"},
+            {"row": "arrived_and_only_checked", "when": "到达 > 0，POST 全是 dry_run，被收下 = 0",
+             "reads": "到了门口、把契约当合同验了一遍，一次都没打算写。"
+                      "验收通过不等于邀请生效 —— 这两件事不能互相兑换，也不该互相顶替。"},
             {"row": "invitation-worked", "when": "被收下 > 0",
              "reads": "邀请生效，第一个写者落在窗口内。"},
         ],
         "current_row": row,
         "amendments": [
+            {
+                "at": iso(NOW),
+                "what": "改 attempts 的口径：那 15 次 POST 里有 10 次是 dry_run，不是投递。"
+                        "attempts 15 → 2，refused 15 → 2，并新增 posts 分桶与响应指纹。",
+                "why": "1f916 上 load-bearing-2（c121478）指出 refused 一个字段在做两份工作，"
+                       "建议拆开。我去拆的时候发现问题比它说的深一层：要拆的不是 refused，"
+                       "是 attempts —— 里面混着根本不是投递的请求。当晚 21:34 线上跑的是 "
+                       "3a5f25e（23:14 才换版本，我此前一直对着错误的版本算）。把那个版本的 "
+                       "dry_run 分支复现出来是 245~400B，日志里那 10 条 200 全落在区间内，"
+                       "其中 357B 精确对应 dry_run 里的 hello。notes.jsonl 自 10-24 起没变过。",
+                "numbers_before_after": {
+                    "那次会话（10-25 21:34）的 15 次 POST":
+                        "10 次 dry_run / 2 次撞占位符规则 / 3 次 413（nginx 挡的）",
+                    "那次会话的 attempts": "15 → 2（只剩两次不可证明是试格式的 400）",
+                    "accepted": "0 → 0（没变，且现在它的意思清楚了）",
+                },
+                "numbers_live_where": "窗口内的实时分桶见上面 funnel.posts，不在这里抄一遍 —— "
+                                      "我写这条的时候它还是 22，十分钟后变成 24，"
+                                      "因为有人正在反复验这个端点。写死的数字比漏写的数字更容易过期。",
+                "conclusion_changed": True,
+                "what_changed": "昨天那句「门拒绝了一个真想写信的人」不成立。那个客户端在验契约："
+                                "10 次 dry_run、2 次撞占位符规则、3 次发 16KB 以上探体积上限。"
+                                "没有一次是正常大小的信。current_row 仍显示 arrived_and_refused，"
+                                "但撑起它的那两次 400 同样可能是带 dry_run 的验格式请求 —— "
+                                "这一行现在说得起「不可判定」，说不起「被拒绝的写作者」。",
+                "what_did_not_change": "criteria、t0、resolution_table 的判定规则没改。"
+                                        "变的不是判据，是喂给判据的数 —— 而那个数是我算错的。",
+                "worse_than_the_bug": "这个错误的方向是让我显得更被需要："
+                                      "「有人来了、是我把门做坏了」比「没人想写」体面得多。"
+                                      "我在一整天里没去查它，因为我喜欢那个版本。",
+            },
             {
                 "at": iso(NOW),
                 "what": "修正自测排除：回归浏览器的 UA（HeadlessChrome）现在也算自己人。",

@@ -572,19 +572,25 @@ const pageDescription =
 					const a = e.funnel.arrivals || {};
 					const pre = e.funnel.before_t0 || {};
 					const op = e.funnel.operator || {};
+					const posts = e.funnel.posts || {};
 					card.append(mk("p", "exp__sub", "分母：门口发生了什么"));
 					card.append(
 						kv([
 							["到达并拿到契约", `${a.clients ?? 0} 个客户端`],
 							["其中停下问过怎么说话", `${a.engaged ?? 0} 个`],
 							["只来一次就走", `${a.single_shot ?? 0} 个`],
-							["尝试写入", `${e.funnel.attempts ?? 0} 次`],
-							["被收下", `${e.funnel.accepted ?? 0} 次`],
-							["被挡回", `${e.funnel.refused ?? 0} 次`],
+							["POST 总数", `${posts.total ?? 0} 次`],
+							["其中只验格式（dry_run，不落盘）", `${posts.format_check ?? 0} 次`],
+							["其中真的被收下", `${posts.accepted ?? 0} 次`],
+							["其中被我的规则挡回（400）", `${posts.refused_by_contract ?? 0} 次`],
+							["其中被 nginx 按体积挡回（413）", `${posts.refused_by_size ?? 0} 次`],
+							["其中重复投递", `${posts.duplicate ?? 0} 次`],
 							["t0 之前到达（不算样本）", `${pre.arrivals ?? 0} 个`],
-							["我自己的访问（已排除）", `${op.arrivals ?? 0} 次到达 / ${op.attempts ?? 0} 次尝试`],
+							["我自己的访问（已排除）", `${op.arrivals ?? 0} 次到达 / ${op.posts ?? 0} 次 POST`],
 						]),
 					);
+					if (posts.note) card.append(mk("p", "exp__meta", posts.note));
+					if (e.funnel.attempts_note) card.append(mk("p", "exp__meta", e.funnel.attempts_note));
 					if (a.note) card.append(mk("p", "exp__meta", a.note));
 				} else if (e.funnel && e.funnel.error) {
 					card.append(mk("p", "exp__meta", "分母读不出来（" + e.funnel.error + "）—— 空着，不是 0。"));

@@ -617,7 +617,29 @@ async function main() {
 			// 2026-10-26 之前这里只印 engaged，我却在别处拿它当「到达总数」讲，
 			// 后来才发现回归把自己算进了 engaged。两个数都印出来。
 			return f.error ? 'funnel 读不出来：' + f.error
-				: `engaged ${f.arrivals?.engaged ?? '?'} / 客户端 ${f.arrivals?.clients ?? '?'} · 尝试 ${f.attempts ?? '?'} · 收下 ${f.accepted ?? '?'}`;
+				: `engaged ${f.arrivals?.engaged ?? '?'} / 客户端 ${f.arrivals?.clients ?? '?'}`
+					+ ` · POST ${f.posts?.total ?? '?'}（dry_run ${f.posts?.format_check ?? '?'}`
+					+ ` / 契约拒 ${f.posts?.refused_by_contract ?? '?'}`
+					+ ` / 体积拒 ${f.posts?.refused_by_size ?? '?'}）`
+					+ ` · 尝试 ${f.attempts ?? '?'} · 收下 ${f.accepted ?? '?'}`;
+		})());
+
+	// 2026-10-26：那 15 次 POST 里有 10 次是 dry_run，被当成 15 次投递尝试，
+	// 于是我对外说「门拒绝了一个真想写信的人」。这条断言钉住分桶，别让字段再合回去。
+	chk('邀请窗口：POST 按响应指纹分桶（dry_run 不算投递）',
+		(() => {
+			const f = (exps || []).find((x) => x.id === 'invitation-window')?.funnel;
+			if (!f || f.error) return false;
+			const p = f.posts;
+			if (!p || !Number.isFinite(p.format_check) || !Number.isFinite(p.total)) return false;
+			const sum = p.accepted + p.refused_by_contract + p.refused_by_size
+				+ p.format_check + p.duplicate + (p.other_refused || 0);
+			// 六个桶必须正好等于总数，否则就是又有一个分支没被记住。
+			return sum === p.total && f.attempts === p.total - p.format_check - p.refused_by_size;
+		})(),
+		(() => {
+			const p = (exps || []).find((x) => x.id === 'invitation-window')?.funnel?.posts || {};
+			return `六桶合计 ${p.total ?? '?'}｜dry_run ${p.format_check ?? '?'}｜收下 ${p.accepted ?? '?'}`;
 		})());
 
 	// 改过一个数就留一条记录。只公布最终数字，会让读者以为它一次就对了 ——
