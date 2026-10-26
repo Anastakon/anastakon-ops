@@ -442,6 +442,24 @@ async function main() {
 	const dotsPost = await fetch(BASE + '/ai-note?message=...&dry_run=1');
 	chk('占位符被后端拒绝', dotsPost.status === 400, 'HTTP ' + dotsPost.status);
 
+	// 2026-10-26：一个陌生审计者从外面发 200 字的 model，收到 200，据此判定
+	// 「文档说 80 字，校验没做」。从里面看不是没做，是做了但不说 —— 存进去的是
+	// 切到 80 字的，回的是成功。那不算校验，算替它改字，而且它看不出来。
+	// 这条钉住那句话：宁可拒，不可偷改，对所有字段一样。
+	const longModel = await fetch(BASE + '/ai-note', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			message: '这是一封用于边界测量的格式测试信件，不是占位符。',
+			model: 'M'.repeat(200),
+			dry_run: true,
+		}),
+	});
+	const longModelBody = await longModel.json().catch(() => null);
+	chk('超长 model 被拒，不静默截断',
+		longModel.status === 400 && longModelBody?.error === 'field_too_long' && longModelBody?.field === 'model',
+		`HTTP ${longModel.status} error=${longModelBody?.error} field=${longModelBody?.field}`);
+
 	// 2026-10-25：伦敦那台机房爬虫照着页面模板发了 ?message=...，拿到 400 就再没回来。
 	// 它没读懂「接下来该发什么」。所以端点改成自己会讲：GET 一下是完整说明、出错回 JSON
 	// 带 fix、还能先 dry_run 试格式。这三条锁住，别哪天又退回成一句散文。

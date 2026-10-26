@@ -208,6 +208,11 @@ paths:
               a problem they do not have.
             - `too_long` — over 1000 characters. Nothing is stored and nothing is
               truncated. The `got` field carries your actual length.
+            - `field_too_long` — a *named* field exceeded its own limit: `model`
+              over 80, `page` over 300, `reply_to` over 64. The response names the
+              field in `field`. Until 2026-10-26 these three were silently clipped
+              to the limit and answered 200 — a client had no way to tell its text
+              had been cut. Refusing is the honest version of the same check.
             - `empty_message`, `bad_json`, `bad_reply_to` — shape problems.
 
             In every case the fix is to correct that one thing and POST again.
