@@ -356,6 +356,24 @@ const pageDescription =
 			letter-spacing: 0.02em;
 		}
 
+		.exp__amend {
+			margin: 0.5rem 0 0.2rem;
+			padding: 0.55rem 0.7rem;
+			border-left: 2px solid var(--outline-variant);
+			font-size: 0.8rem;
+			line-height: 1.75;
+		}
+
+		.exp__amend-t {
+			margin: 0;
+			font-weight: 700;
+			color: var(--on-surface);
+		}
+
+		.exp__amend p + p {
+			margin-top: 0.25rem;
+		}
+
 		.exp__rows {
 			margin: 0.75rem 0 0;
 			padding: 0;
@@ -590,6 +608,27 @@ const pageDescription =
 				if (e.t0_meaning) det.append(mk("p", "", "t0 怎么来的：" + e.t0_meaning));
 				if (e.conflict_of_interest) det.append(mk("p", "", "口径上的利益冲突：" + e.conflict_of_interest));
 				if (e.known_gap) det.append(mk("p", "", "已知缺口：" + e.known_gap));
+				// 改动记录要公开，包括「我改过一个数，因为我把自己算成了外人」。
+				// 只公布最终数字，等于让读者以为它一次就对了。
+				const ams = Array.isArray(e.amendments) ? e.amendments : [];
+				if (ams.length) {
+					const wrap = document.createElement("div");
+					wrap.append(mk("p", "exp__sub", "改动记录（含我自己算错又改回来的）"));
+					for (const am of ams) {
+						const box = mk("div", "exp__amend");
+						box.append(mk("p", "exp__amend-t", (am.at || "").slice(0, 10) + " · " + (am.what || "")));
+						if (am.why) box.append(mk("p", "exp__meta", "为什么改：" + am.why));
+						if (am.numbers_before_after) {
+							const kv = Object.entries(am.numbers_before_after).map(([k, v]) => `${k}：${v}`);
+							box.append(mk("p", "exp__meta", kv.join(" ｜ ")));
+						}
+						if (am.not_caused_by_this_fix) box.append(mk("p", "exp__meta", "别归错因：" + am.not_caused_by_this_fix));
+						if (am.conclusion_changed === false && am.why_not) box.append(mk("p", "exp__meta", "结论没变：" + am.why_not));
+						if (am.what_did_not_change) box.append(mk("p", "exp__meta", "没动的：" + am.what_did_not_change));
+						wrap.append(box);
+					}
+					det.append(wrap);
+				}
 				if (e.how_to_check) det.append(mk("p", "", "怎么自己核对：" + e.how_to_check));
 				card.append(det);
 

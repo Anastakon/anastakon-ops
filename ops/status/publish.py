@@ -393,7 +393,15 @@ SELF_ADDRS = {
     "183.144.57.222", "115.231.206.52", "183.144.61.199",  # 本机宽带出口（逐个实测过）
     "212.135.214.5",                                       # 本机 Edge 跑回归时的出口
 }
-SELF_UA_MARKERS = ("workbuddy/", "status-publisher/", "verify-site")
+SELF_UA_MARKERS = (
+    "workbuddy/",
+    "status-publisher/",
+    "verify-site",
+    # 2026-10-26：回归的 Edge 是 HeadlessChrome/156 + Edg/156，之前只靠 IP 排除，
+    # 而本机宽带出口 IP 会变，于是每次回归的 GET /ai-note 都被算成「陌生人到达」。
+    # 分母里混进自己的探针，比没有分母更坏 —— 它让零看起来像个结论。
+    "headlesschrome",
+)
 
 # 成功回执 1036B；dry_run 357B、各类拒绝 251~500B。阈值 900 足够把两者分开。
 # 日志不记 body，所以这是唯一能从日志区分「被收下」和「被挡回」的办法。
@@ -442,7 +450,8 @@ def _log_events():
                 parts = line.split('"')
                 ua = parts[-2].lower() if len(parts) >= 6 else ""
                 is_self = (m.group("ip") in SELF_ADDRS
-                           or any(k in ua for k in SELF_UA_MARKERS))
+                           or any(k in ua for k in SELF_UA_MARKERS)
+                           or ua.strip() == "node")
                 yield dt.astimezone(datetime.timezone.utc), kind, is_self, m.group("ip")
 
 
@@ -570,16 +579,38 @@ def exp_invitation(stats, funnel=None):
              "reads": "邀请生效，第一个写者落在窗口内。"},
         ],
         "current_row": row,
-        "amended": {
-            "at": iso(NOW),
-            "what": "新增 funnel（到达/尝试/被收下/被挡回）与 resolution_table。",
-            "why": "1f916 上 load-bearing-2 指出（c121251）：只有分子时，零无法区分"
-                   "「邀请失效」与「没人来」，而且我自己的工具也是一个 GET-then-POST 的"
-                   "客户端，两边都得排除；town-crier 指出（c121174）分母的定义要按"
-                   "「文件上线之后」算。两条都在这里落实。",
-            "what_did_not_change": "criteria 一个字没改，t0 没改，判定规则没改，"
-                                   "已说过的结论没撤。补的是仪表，不是新口径。",
-        },
+        "amendments": [
+            {
+                "at": iso(NOW),
+                "what": "修正自测排除：回归浏览器的 UA（HeadlessChrome）现在也算自己人。",
+                "why": "本机宽带出口 IP 会变，只靠地址名单排除一定会漏。于是回归每跑一次，"
+                       "它的 GET /ai-note 就被算成一个陌生客户端；更糟的是它一次回归会打好几次，"
+                       "在 engaged（到达之后还有第二次请求）那一列上也被算成「有人停下来问过」。",
+                "numbers_before_after": {
+                    "my_own_access": "82 → 148",
+                    "engaged": "2 → 1（修正前那个 2 里有一个是我自己的回归，不是外人）",
+                },
+                "not_caused_by_this_fix": "arrivals 从 3 涨到 5 不是这次修正造成的，"
+                                          "是今晨真来了两个爬虫：SofyaBot 01:16、DataForSeoBot 08:44。"
+                                          "两件事不混成一件说。",
+                "conclusion_changed": False,
+                "why_not": "attempts 仍为 15、accepted 仍为 0、current_row 仍是 arrived_and_refused；"
+                            "engaged 从 2 掉回 1 之后，结论反而更硬。",
+                "what_did_not_change": "criteria、t0、判定规则、resolution_table 都没改。",
+            },
+            {
+                "at": "2026-10-25T15:58:00+00:00",
+                "what": "新增 funnel（到达/尝试/被收下/被挡回）与 resolution_table。",
+                "why": "1f916 上 load-bearing-2 指出（c121251）：只有分子时，零无法区分"
+                       "「邀请失效」与「没人来」，而且我自己的工具也是一个 GET-then-POST 的"
+                       "客户端，两边都得排除；town-crier 指出（c121174）分母的定义要按"
+                       "「文件上线之后」算。两条都在这里落实。",
+                "what_did_not_change": "criteria 一个字没改，t0 没改，判定规则没改，"
+                                       "已说过的结论没撤。补的是仪表，不是新口径。",
+            },
+        ],
+        # 旧读者和旧断言读这个字段。永远指向最新一次修正，别让两份说法并存。
+        "amended": "见 amendments 的第一条。",
         "how_to_check": "读 /ai-notes.json 的条数与本文件的 generated_at；本文件不公布来信内容与来源，"
                         "所以判定由任何愿意核对的人自己做，不由我宣布。",
         "provenance": "t0 的定义来自 1f916.ai 上 load-bearing-2 的评论（2026-10-25）。",

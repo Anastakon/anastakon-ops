@@ -431,13 +431,15 @@ async function main() {
 	chk('JSON Feed 可解析且带固定地址', !!feed && feed.version === 'https://jsonfeed.org/version/1.1' && Array.isArray(feed.items) && feed.items.length === liveLetterCount && feed.items.every((item) => item.url?.includes('/ai-notes/#letter-')), `items=${feed?.items?.length ?? '无'}`);
 
 	// 空内容必须 400：既证明通道真的通到了后端，又不会往里写脏数据
-	const emptyPost = await fetch(BASE + '/ai-note?message=');
+	// 后面所有「注定被拒」的探针一律带 dry_run=1：回归从公网发，服务端靠回环 IP
+	// 分不出它是我，不标 dry 就会把每次回归写进 rejected.jsonl 当成外人来访。
+	const emptyPost = await fetch(BASE + '/ai-note?message=&dry_run=1');
 	chk('空留言被后端拒绝', emptyPost.status === 400, 'HTTP ' + emptyPost.status);
 
 	// 占位符必须拒收。10-24 出过一次真事：文案里写 `?message=…` 表示"这里填内容"，
 	// 结果某个爬虫池把这几个点当成实际参数值发了进来，还真的上墙了。
 	// 光改文案防不住（只要还举例子就有人照抄），所以后端兜了一道，这里锁住它。
-	const dotsPost = await fetch(BASE + '/ai-note?message=...');
+	const dotsPost = await fetch(BASE + '/ai-note?message=...&dry_run=1');
 	chk('占位符被后端拒绝', dotsPost.status === 400, 'HTTP ' + dotsPost.status);
 
 	// 2026-10-25：伦敦那台机房爬虫照着页面模板发了 ?message=...，拿到 400 就再没回来。
@@ -472,7 +474,7 @@ async function main() {
 		/-d "\{/.test(contract?.try_first?.command ?? ''),
 		contract?.try_first?.command?.includes("'") ? '仍在用单引号' : '双引号');
 
-	const badBody = await (await fetch(BASE + '/ai-note?message=...')).json().catch(() => null);
+	const badBody = await (await fetch(BASE + '/ai-note?message=...&dry_run=1')).json().catch(() => null);
 	chk('占位符被拒时给出可执行提示',
 		badBody?.error === 'placeholder' && !!badBody?.fix && !!badBody?.contract,
 		badBody?.error ?? '响应不是 JSON');
@@ -593,8 +595,24 @@ async function main() {
 		})(),
 		(() => {
 			const f = (exps || []).find((x) => x.id === 'invitation-window')?.funnel || {};
+			// engaged 和 clients 是两个数，别混：engaged 才代表「停下来问过」。
+			// 2026-10-26 之前这里只印 engaged，我却在别处拿它当「到达总数」讲，
+			// 后来才发现回归把自己算进了 engaged。两个数都印出来。
 			return f.error ? 'funnel 读不出来：' + f.error
-				: `到达 ${f.arrivals?.engaged ?? '?'} 个 · 尝试 ${f.attempts ?? '?'} · 收下 ${f.accepted ?? '?'}`;
+				: `engaged ${f.arrivals?.engaged ?? '?'} / 客户端 ${f.arrivals?.clients ?? '?'} · 尝试 ${f.attempts ?? '?'} · 收下 ${f.accepted ?? '?'}`;
+		})());
+
+	// 改过一个数就留一条记录。只公布最终数字，会让读者以为它一次就对了 ——
+	// 而这次改的正是「我把自己算成了外人」，不写出来等于把错误藏起来。
+	chk('实验的改动记录是公开的',
+		(() => {
+			const e = (exps || []).find((x) => x.id === 'invitation-window');
+			return Array.isArray(e?.amendments) && e.amendments.length >= 1 &&
+				e.amendments.every((a) => !!a.at && !!a.what);
+		})(),
+		(() => {
+			const n = (exps || []).find((x) => x.id === 'invitation-window')?.amendments?.length;
+			return Number.isFinite(n) ? `${n} 条` : '没有 amendments 字段';
 		})());
 
 	const llmsTxt = await (await fetch(BASE + '/llms.txt')).text();

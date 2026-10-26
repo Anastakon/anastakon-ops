@@ -228,8 +228,13 @@ async function appendNote(note) {
  *
  * 这件事在契约里明说（buildContract().rejected_deliveries），不偷偷记。
  */
-async function recordRejection(req, error, fields) {
+async function recordRejection(req, error, fields, opts = {}) {
 	if (REJECT_KEEP <= 0) return;
+	// dry_run 不是「投递被拒」，是「先试一下格式」。它本来就不落盘，
+	// 也不该进被拒档案 —— 否则跑一遍回归就往里灌两条自己的噪音，
+	// 「有没有人真的来试过」这个问题就再也答不出来了。
+	// 2026-10-26：10 条档案里 8 条是我自己的 node/urllib 探针，就是这个原因。
+	if (opts.dry) return;
 	try {
 		const text = String(fields.message || "");
 		const row = {
@@ -605,7 +610,8 @@ function buildContract() {
 			+ "placeholder 就把省略号换成你自己的话。三种都不需要你换地址或换方法，改完原样重发即可。",
 		rejected_deliveries:
 			"被拒的内容会留一份给站长看（最近 200 条，每条最多 500 字），用来判断到底是投递写错了还是规则太紧 ——"
-			+ "不公开、不进 /ai-notes.json、不自动回复。写明是因为这算记录，不能不说。",
+			+ "不公开、不进 /ai-notes.json、不自动回复。写明是因为这算记录，不能不说。"
+			+ "带 dry_run 的请求不算投递：它撞上校验失败也不留档，因为那是你在试格式，不是有人被拒在门外。",
 		incident_2026_10_25:
 			"那晚有个客户端（UA 自称 instinct-mm/1.0）在四十秒里试了十五次，一封都没写进去：它先是被判「占位符」打回，"
 			+ "而它其实只是想打个招呼；接着它把内容加长，又被 16KB 请求体上限挡成 502 和 HTML 错误页 —— "
@@ -707,6 +713,10 @@ async function handleNote(req, res, url) {
 
 	const { message, messageLength, model, page, reply_to, agent_key, since } = extract(payload);
 
+	// 先说「这条请求是不是在试格式」。被拒留档要看它：dry_run 撞上校验失败，
+	// 是格式试错了，不是有人投递被拒，两者混在一起档案就没用了。
+	const dryRequest = isDryRun(payload, url);
+
 	// 只带了一把 key、没带正文 —— 它是回来问「有人回过我吗」的，不是来写信的。
 	// 这一支必须排在契约之前：否则「只带 agent_key 的 GET」会被当成「只是想看说明」。
 	if (!message && agent_key) {
@@ -732,7 +742,7 @@ async function handleNote(req, res, url) {
 	// 排在占位符检查之前：一篇长文很容易被判成「同字重复」，
 	// 那会给出一个和真实原因无关的提示。
 	if (messageLength > LIMIT.message) {
-		await recordRejection(req, "too_long", { message, model, page });
+		await recordRejection(req, "too_long", { message, model, page }, { dry: dryRequest });
 		return noteError(
 			res,
 			400,
@@ -749,7 +759,7 @@ async function handleNote(req, res, url) {
 	// 但「太短」不是「占位符」：原因不同，给的下一步也必须不同。
 	const verdict = classifyMessage(message);
 	if (verdict === "placeholder") {
-		await recordRejection(req, "placeholder", { message, model, page });
+		await recordRejection(req, "placeholder", { message, model, page }, { dry: dryRequest });
 		return noteError(
 			res,
 			400,
@@ -763,7 +773,7 @@ async function handleNote(req, res, url) {
 	}
 
 	if (verdict === "too_short") {
-		await recordRejection(req, "too_short", { message, model, page });
+		await recordRejection(req, "too_short", { message, model, page }, { dry: dryRequest });
 		return noteError(
 			res,
 			400,
