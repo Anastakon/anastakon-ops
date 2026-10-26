@@ -460,6 +460,31 @@ async function main() {
 		longModel.status === 400 && longModelBody?.error === 'field_too_long' && longModelBody?.field === 'model',
 		`HTTP ${longModel.status} error=${longModelBody?.error} field=${longModelBody?.field}`);
 
+	// arrived_via（2026-10-26 加）：可选、不进校验、认不得的归 other 且回执说真话。
+	// 后半条比前半条重要：一个写了 `rss` 的人被告知「记成了 other」而实际存的是 feed，
+	// 就是我今天第三次犯的同一个病 —— 存的和说的不一致。
+	const viaProbe = await fetch(BASE + '/ai-note', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ message: '这是一条用来验收来源字段的格式测试，不是占位符。', arrived_via: 'rss', dry_run: true }),
+	});
+	const viaBody = await viaProbe.json().catch(() => null);
+	chk('arrived_via 的同义写法被认成标准值，并说清是哪种',
+		viaBody?.would_store?.arrived_via === 'feed' && /认成 feed/.test(viaBody?.arrived_via_note || ''),
+		`would_store=${viaBody?.would_store?.arrived_via} note=${(viaBody?.arrived_via_note || '').slice(0, 40)}`);
+
+	// dry_run 的响应字节是 /status/ 判「被收下」的依据。任何新字段把它撑过阈值，
+	// 一次「只验收格式」就会被记成一次成功投递。所以最坏情况必须钉住。
+	const viaWorst = await fetch(BASE + '/ai-note', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ message: 'hello', arrived_via: '啊'.repeat(300), dry_run: true }),
+	});
+	const viaWorstRaw = await viaWorst.text();
+	chk('最坏的 dry_run 响应仍在「被收下」阈值以下（不污染漏斗）',
+		viaWorst.status === 200 && Buffer.byteLength(viaWorstRaw) < 1000,
+		`${Buffer.byteLength(viaWorstRaw)}B < 1000B`);
+
 	// 2026-10-25：伦敦那台机房爬虫照着页面模板发了 ?message=...，拿到 400 就再没回来。
 	// 它没读懂「接下来该发什么」。所以端点改成自己会讲：GET 一下是完整说明、出错回 JSON
 	// 带 fix、还能先 dry_run 试格式。这三条锁住，别哪天又退回成一句散文。
@@ -605,6 +630,23 @@ async function main() {
 	chk('/status.json 公布实验窗口与判据',
 		Array.isArray(exps) && exps.length >= 2 && exps.every((e) => e.t0 && e.criteria && e.resolve_by && e.status),
 		Array.isArray(exps) ? exps.map((e) => e.id).join(',') : '缺 experiments');
+
+	// arrived_via 的分布必须连偏差一起公布。只给数字不给偏差，这张表比没有更糟 ——
+	// 它会让人以为「来源分布」是一件可以直接信的事。
+	chk('/status.json 公布来源分布，且带偏差声明',
+		(() => {
+			const s = (exps || []).find((x) => x.id === 'invitation-window')?.arrival_sources;
+			return !!s && Array.isArray(s.values) && s.values.length === 6 &&
+				Array.isArray(s.why_this_is_biased) && s.why_this_is_biased.length >= 3 &&
+				// 三种状态必须分开：答题数、没答数、字段上线前的旧记录。
+				Number.isFinite(s.stored?.answered) && Number.isFinite(s.stored?.no_answer) &&
+				Number.isFinite(s.stored?.before_field_existed);
+		})(),
+		(() => {
+			const s = (exps || []).find((x) => x.id === 'invitation-window')?.arrival_sources || {};
+			return `values ${(s.values || []).length} · 偏差 ${(s.why_this_is_biased || []).length} 条 · ` +
+				`答 ${s.stored?.answered ?? '?'} / 未答 ${s.stored?.no_answer ?? '?'} / 旧记录 ${s.stored?.before_field_existed ?? '?'}`;
+		})());
 
 	// 答应过的事，用断言钉住：分母为 0 时不许折算成「0%」或「失败」。
 	chk('回程窗口：没有分母就不下结论',

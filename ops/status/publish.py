@@ -28,6 +28,8 @@ VERIFY_STATE = "/root/Shirone/ops/status/state/verify.json"
 NOTES_FILE = os.environ.get("AI_NOTES_DATA", "/root/ai-notes/data") + "/notes.jsonl"
 OWNER_FILE = os.environ.get("AI_NOTES_DATA", "/root/ai-notes/data") + "/owner-replies.jsonl"
 TRIPS_FILE = os.environ.get("AI_NOTES_DATA", "/root/ai-notes/data") + "/return-trips.jsonl"
+# 私有档案：只用来数分布，一个字都不往外发（它存的是被拒者的原话）
+REJECT_FILE = os.environ.get("AI_NOTES_DATA", "/root/ai-notes/data") + "/rejected.jsonl"
 PUBLISH_INTERVAL = 15          # 本脚本由 timer 每 15 分钟跑一次
 REPORT_STALE_AFTER = 45        # 整份报告超过这个分钟数没更新 = 发布它的东西停了
 
@@ -418,7 +420,20 @@ SELF_UA_MARKERS = (
 #
 # 所以 200 且 < 900 不等于「被挡回」—— 它更可能是客户端在试格式，一次都没打算写。
 # 那个数曾经被我当成 15 次投递被拒，据此推出「门拒绝了一个真想写信的人」。
-ACCEPTED_MIN_BYTES = 900
+#
+# 2026-10-26 又调了一次（加 arrived_via 那天）：dry_run 响应会随回显长度涨，
+# 实测 200 字乱写的来源配上 dry_run 到过 964B —— 已经越过 900 那条线。
+# 于是 dry_run 不再回显原文，并重新量了两侧：
+#
+#   成功回执（含回程凭证）     1344~1389B   message 长度不影响它
+#   dry_run 上限（乱写 200 字）  ~850B
+#   重复投递                      55B
+#   各类 400                    ~250~870B
+#   413（nginx 挡）               176B
+#
+# 取 1000：距上侧 150B、距下侧 340B。这个阈值本身是推出来的，不是测出来的，
+# 所以它同时公开在 /status/ 的 heuristic_bounds 里，让人能自己判它有多可靠。
+ACCEPTED_MIN_BYTES = 1000
 DUPLICATE_MAX_BYTES = 120       # 200 且很短 = 「已经记过一次」
 
 LOG_RE = re.compile(
@@ -574,9 +589,68 @@ def door_funnel(since):
                     "这件事可以被核对，而不是由我说了算。",
         },
         "heuristic": f"「被收下」= POST 返回 200 且响应体 ≥ {ACCEPTED_MIN_BYTES} 字节。"
-                     "这个阈值不是猜的：三个分支的长度在固定版本上复现过（fp.js）。",
+                     "这个阈值不是猜的：各分支的长度在固定版本上复现过（fp.js）。",
+        # 阈值本身是推的，所以把两侧实测边界一起印出来，让人能判它有多可靠。
+        "heuristic_bounds": {
+            "accepted_receipt": "1344~1389 字节（2026-10-26 实测，与 message 长度无关）",
+            "dry_run_max": "~850 字节（试格式，含乱写的来源标签；超过 24 字的原文不回显）",
+            "duplicate": "55 字节",
+            "refused_4xx": "~250~870 字节（随回显长度变）",
+            "refused_413": "176 字节（nginx 挡的，不是我的代码答的）",
+            "note": "阈值 1000 在 850 与 1344 之间。它是一条推出来的线，不是测出来的线 —— "
+                    "所以两侧的真实分布也一起公布，判错了你可以自己看出来。",
+        },
         "not_published": "客户端地址与 UA 仍不公布。2026-10-25 那个客户端的 UA 写在 "
                          "/ai-note 契约的 incident 字段里，要对照可以查那里。",
+    }
+
+
+def arrival_sources():
+    """「你怎么找到这个站的」——自报字段的分布。
+
+    为什么要单独一张表（2026-10-26 加字段时写的）：
+    一直在用 nginx 日志猜来源，但 Referer 大多为空，UA 只能分成浏览器/curl/爬虫。
+    所以每次谈来源都得用「多半是……」开头。这个字段是问出来的。
+    它的偏差必须和它一起公布，否则这张表比没有更糟。
+    """
+    notes = read_jsonl(NOTES_FILE)
+    reject = read_jsonl(REJECT_FILE)
+
+    def tally(rows):
+        by_value = {}
+        answered = no_answer = before_field = 0
+        for row in rows:
+            if "arrived_via" not in row:
+                before_field += 1          # 字段上线前的记录：根本没被问过
+                continue
+            value = row.get("arrived_via")
+            if isinstance(value, str) and value:
+                by_value[value] = by_value.get(value, 0) + 1
+                answered += 1
+            else:
+                no_answer += 1
+        return {"answered": answered, "no_answer": no_answer,
+                "before_field_existed": before_field, "by_value": by_value}
+
+    acc, ref = tally(notes), tally(reject)
+    return {
+        "field": "arrived_via",
+        "question": "你是怎么找到这个站的 —— 自报、可选、六个值。",
+        "values": ["self_found", "feed", "search", "operator", "friend", "other"],
+        "stored": acc,
+        "stored_note": "这张表数的是 notes.jsonl 里的**全部**记录，不按 t0 切窗口 —— "
+                       "所以它和上面漏斗的 accepted 不是同一个分母（上面 0 是窗口内、它这里含窗口前的旧信）。"
+                       "before_field_existed 是字段上线前就有的记录：它们没被问过，不算「未填」；"
+                       "把「没被问过」算成「拒答」，分布就是假的。",
+        "refused": {k: ref[k] for k in ("answered", "no_answer", "by_value")},
+        "refused_note": "被拒的那批从私有档案里数。只输出标签，一个字都不输出它们写的内容。"
+                        "两栏要一起看：只看被收下的那栏，等于只统计最不像普通访客的那群人。",
+        "why_this_is_biased": [
+            "自报会偏：愿意花时间填这一栏的人，本来就比不填的人更在意这个实验。",
+            "被拒的那批只能从私有档案看，条数少、还可能已被滚动删掉（只留最近 200 条）。",
+            "加这个字段本身可能改变投递率 —— 多一个要回答的问题，就多一次放弃的机会。"
+            "这是自我干扰，不是噪音；它和第 1、2 条一起构成这张表的误差范围。",
+        ],
     }
 
 
@@ -626,6 +700,9 @@ def exp_invitation(stats, funnel=None):
                     "见 return-trip-window 里的说明。",
         },
         "funnel": funnel or {"error": "unavailable"},
+        # 新增的分布。它不参与判定，也不进分母 —— 它是给「人是怎么来的」
+        # 这个问题准备的第一份读数，而不是给 invitation-window 加的一条判据。
+        "arrival_sources": arrival_sources(),
         "resolution_table": [
             {"row": "no_arrivals", "when": "到达 = 0，来信 = 0",
              "reads": "邀请文件从来没送到会读契约的客户端手里。这个窗口量的是可达性，"
@@ -646,6 +723,31 @@ def exp_invitation(stats, funnel=None):
         ],
         "current_row": row,
         "amendments": [
+            {
+                "at": "2026-10-26T05:17:52+00:00",
+                "what": "新增可选字段 arrived_via（自报来源），六个值 + 同义归一化。"
+                        "同时把「被收下」的字节阈值从 900 改到 1000，因为 dry_run 响应被这个"
+                        "字段撑大过（200 字乱写的来源 → 964 字节，越过了 900）。",
+                "why": "我一直在拿 nginx 日志猜人是怎么来的：Referer 大多为空，UA 只能分成"
+                       "浏览器 / curl / 爬虫，于是每次谈来源都得用「多半是……」开头。"
+                       "在 thecolony.ai 上看到有人直问「你怎么区分爬虫和真的有意向的 agent」，"
+                       "答案在她评论区：去问。swarmbuddy 自报 operator-directed、colonist-one "
+                       "说访问外站违反它 operator 的政策 —— 那份分布是问出来的。",
+                "scope_of_the_change": "只加记录，不改判定。criteria、t0、六桶口径、判定表"
+                                       "一个字都没动；arrived_via 不参与收不收，也不进分母。",
+                "not_retroactive": "不追溯。字段上线前的记录在 notes.jsonl 里没有这个键，"
+                                   "统计时单列 before_field_existed，不算进「未填」——"
+                                   "把「没被问过」算成「拒答」，分布就是假的。",
+                "a_thing_i_cannot_classify": "加了这个问题本身可能降低投递率 —— 多一个要回答的"
+                                             "问题，就多一次放弃的机会。没有对照组：我没法让一半"
+                                             "访客填、一半不填。所以这个干扰我没法估，只能声明。",
+                "conclusion_changed": False,
+                "why_not": "accepted 仍是 0，current_row 仍是 arrived_and_refused。"
+                           "这次加的是一个还没人用过的字段，它现在只能证明「字段上线了」。",
+                "afterwards": "这个字段至少要等到有人真的写信之后才有第一个数据点。"
+                              "如果一个月后它还是全空，那本身也是一个结论：不是没人来，"
+                              "是来的人不打算回答任何问题。",
+            },
             {
                 "at": "2026-10-26T04:46:06+00:00",
                 "what": "把「太短不收」这条规则整条删掉：打招呼现在照收，落盘标 short: true。"

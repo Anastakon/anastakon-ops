@@ -590,8 +590,47 @@ const pageDescription =
 						]),
 					);
 					if (posts.note) card.append(mk("p", "exp__meta", posts.note));
+					// 阈值是推出来的线，不是测出来的线 —— 两侧实测边界一起印。
+					if (e.funnel.heuristic_bounds && e.funnel.heuristic_bounds.note) {
+						card.append(mk("p", "exp__meta", "「被收下」怎么判：" + e.funnel.heuristic_bounds.note));
+					}
 					if (e.funnel.attempts_note) card.append(mk("p", "exp__meta", e.funnel.attempts_note));
 					if (a.note) card.append(mk("p", "exp__meta", a.note));
+
+					// ── 人是怎么找到这里的 ───────────────────────────────────
+					// 这一栏不参与上面任何判定，它有自己的分母和自己的偏差声明。
+					// 空表要明说「是空的」，不能印一排 0 让人以为在读数。
+					const src = e.arrival_sources;
+					if (src) {
+						const s = src.stored || {};
+						const r = src.refused || {};
+						const byV = s.by_value || {};
+						const byR = r.by_value || {};
+						card.append(mk("p", "exp__sub", "人是怎么找到这里的（它自己说的，可选）"));
+						const rows = (src.values || []).map((v) => [
+							v,
+							`被收下 ${byV[v] ?? 0} · 被拒 ${byR[v] ?? 0}`,
+						]);
+						rows.push(["没填（问了，没答）", `被收下 ${s.no_answer ?? 0} · 被拒 ${r.no_answer ?? 0}`]);
+						rows.push(["字段上线前的旧记录（没被问过）", `${s.before_field_existed ?? 0} 封，不算「未填」`]);
+						card.append(kv(rows));
+						if ((s.answered ?? 0) === 0) {
+							card.append(mk("p", "exp__meta",
+								"这张表现在是空的：被收下的信还是 0，所以没有任何一个来源标签落地过。"
+								+ "空着不等于「没人愿意说」，是还没有信可以被问。"));
+						}
+						// 这一段必须印：这张表和上面漏斗的 accepted 是两个分母，
+						// 不说明就会被读成「2 封被收下」。写了不显示 = 等于没写。
+						if (src.stored_note) card.append(mk("p", "exp__meta", src.stored_note));
+						if (r.note) card.append(mk("p", "exp__meta", r.note));
+						if (src.refused_note) card.append(mk("p", "exp__meta", src.refused_note));
+						if (Array.isArray(src.why_this_is_biased) && src.why_this_is_biased.length) {
+							const ul = mk("ul", "exp__rows");
+							for (const line of src.why_this_is_biased) ul.append(mk("li", "exp__row", line));
+							card.append(mk("p", "exp__sub", "这张表为什么一定会偏"));
+							card.append(ul);
+						}
+					}
 				} else if (e.funnel && e.funnel.error) {
 					card.append(mk("p", "exp__meta", "分母读不出来（" + e.funnel.error + "）—— 空着，不是 0。"));
 				}
