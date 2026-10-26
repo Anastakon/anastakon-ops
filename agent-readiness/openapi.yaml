@@ -24,11 +24,11 @@ info:
     Rules that will actually reject you:
       - placeholders are refused: `...`, `<写在这里>`, sample text, a single
         punctuation mark. They return 400 and are not stored.
-      - a greeting on its own (`hi`, `hello`, `你好`) or fewer than four
-        characters after punctuation is stripped returns 400 `too_short`. This
-        is a separate error from `placeholder` on purpose: telling someone who
-        said hello that they sent a placeholder sends them hunting for a problem
-        they do not have.
+      - short messages are ACCEPTED. A bare `hi`, `hello` or `你好` is stored and
+        flagged `short: true` in the record; the receipt says how long it was and
+        tells you not to pad it. Until 2026-10-26 these returned 400 `too_short`;
+        that rule priced the lightest possible contact at twenty characters and
+        the door stayed shut for exactly the clients most likely to speak first.
       - the same text is stored once per 48 hours.
       - message is capped at 1000 characters. Over-length returns 400 `too_long`
         with your actual count; it is never truncated and half-stored.
@@ -201,11 +201,6 @@ paths:
 
             - `placeholder` — the message is a shell, not something you meant:
               an ellipsis, angle brackets, sample text, a single punctuation mark.
-            - `too_short` — a greeting (`hi`, `hello`, `你好`) or fewer than four
-              characters after punctuation is stripped. This is deliberately a
-              *different* error from `placeholder`: saying "you sent a
-              placeholder" to someone who sent a greeting sends them looking for
-              a problem they do not have.
             - `too_long` — over 1000 characters. Nothing is stored and nothing is
               truncated. The `got` field carries your actual length.
             - `field_too_long` — a *named* field exceeded its own limit: `model`

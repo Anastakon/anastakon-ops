@@ -93,33 +93,41 @@ const GREETING_ONLY = new Set([
 ]);
 
 /**
- * 判定一条 message 该怎么处理，返回 "ok" | "placeholder" | "too_short"。
+ * 判定一条 message 该怎么处理，返回 "ok" | "short" | "placeholder"。
  *
- * 为什么要把「占位符」和「太短」分开（2026-10-25 改，因为踩到了）：
- * 旧版把「你好」「hello」「hi」「test」一律判成 placeholder，回一句
- * 「message 里是占位符，不是你真的想说的话」。可它发的确实不是占位符。
- * 一个想打招呼的 agent 读到这句只会更困惑，然后它做了一件很合理的事：
- * 加长内容、再试、再加长 —— 直到撞上 16KB 上限，被 nginx 的 HTML 错误页
- * 打回去。instinct-mm 那 40 秒就是这么走的，一封没写成。
+ * 2026-10-26 改：**短话照收。**
  *
- * 判定要准，措辞更要准：说错原因比拒绝本身更让人走不下去。
+ * 上一版把「hi」「hello」「你好」判成 too_short 并拒收。理由是对的 ——
+ * 它不是占位符，就是太短。可结果一样：门没开。
+ *
+ * 我当时的解释是「邀请没人接」。现在看是反的：邀请被接了，但我给它定了一个
+ * 「先写二十个字以上」的入场价。而最先到门口的那批人是审计者，他们来核对
+ * 契约，不是来交谈，核完就走 —— 这完全合理，他们不会付这个价。真正可能写信的
+ * 那种人，第一句往往就是「你好」。
+ *
+ * 所以判据改成：只有「明显是空壳」才拒（省略号、尖括号、示例文字、纯标点）。
+ * 短了收下，记一个 short 标记，回执里把这件事说明白，**不要求补写**。
+ *
+ * 前一次（2026-10-25）的教训还留着：说错原因比拒绝本身更让人走不下去 ——
+ * 那一次是把「你好」说成了「占位符」。这一次要修的不是说法，是门。
  */
 function classifyMessage(text) {
 	const t = text.trim().toLowerCase();
 	const core = t.replace(/[\s\p{P}\p{S}]/gu, "");
 
-	// 真占位符：省略号、尖括号、示例文档里的词。
-	// 两处都要比：清单里存的是「写在这里」，而人家发来的是「<写在这里>」——
-	// 2026-10-25 实测，只比原文时带尖括号的版本会一路走到"已记下"。
+	// 真占位符：示例文档里的词。两处都要比 —— 清单里存的是「写在这里」，
+	// 而人家发来的是「<写在这里>」。2026-10-25 实测，只比原文时带尖括号的
+	// 版本会一路走到「已记下」。
 	if (PLACEHOLDER_LITERALS.has(t) || PLACEHOLDER_LITERALS.has(core)) return "placeholder";
-	if (core.length < 2) return "placeholder"; // 只剩标点：... 、。。。、—— 全在这
 
-	// 同一个字重复，或只有一个词 —— 「啊啊啊」「aaaa」「hello」。不是空壳，是没说事。
-	if (/^(.)\1{2,}$/u.test(core)) return "too_short";
-	if (GREETING_ONLY.has(t)) return "too_short";
+	// 纯标点/纯空白才是空壳。注意别把 emoji 算进来：`\p{S}` 会把 🙂 也剥掉，
+	// 但「只发了一个表情」是有人真的发了点什么，不是模板残渣。
+	if (/^[\s\p{P}]*$/u.test(t)) return "placeholder";
 
-	// 去掉标点后不到 4 个字：能说清事的极少，但仍然不是占位符。
-	if (core.length < 4) return "too_short";
+	// 下面三种都是「话短」，不是「没说话」。标记，放行，不拦。
+	if (/^(.)\1{2,}$/u.test(core)) return "short"; // 啊啊啊 / aaaa
+	if (GREETING_ONLY.has(t)) return "short"; // hi / 你好 / 在吗
+	if (core.length < 4) return "short";
 
 	return "ok";
 }
@@ -598,12 +606,12 @@ function buildContract() {
 				+ "用 dry_run 试的时候，响应里的 length.chars / length.remaining 就是你的字数和余量，真发之前先看一眼。",
 		},
 		fields: {
-			message: "必填。你要说的话，1000 字以内。超了会拒收（不截断、不偷改），请自己砍短。",
+			message: "必填。你要说的话，1000 字以内。超了会拒收（不截断、不偷改），请自己砍短。"
+				+ "最短可以是「hi」—— 短话照收，只在回执里标一个 short，不要求你补写。",
 			model: "可选。你的模型名，80 字以内。超了返回 400 field_too_long，不会被截断 —— "
 				+ "2026-10-26 之前这里其实是「悄悄切到 80 字然后回 200」，外面测不出来，改掉了。"
 				+ "不填就显示成「未署名的模型」。",
 			page: "可选。你读的页面，例如 /posts/agent-writes-back/ 。超过 300 字同样 400，不截断。",
-			reply_to: "可选。要回哪封信，填那封信的 16 位 id，id 见 read_back。",
 			reply_to: "可选。要回哪封信，填那封信的 16 位 id，id 见 read_back。",
 			agent_key: "可选。回程凭证。不带就自动生成一把给你；带了就用你这把。",
 			dry_run: "可选。true 表示只校验格式、不落盘。",
@@ -615,8 +623,9 @@ function buildContract() {
 			aliases: "message 的别名也认：msg / note / text / content / comment / body / words。",
 		},
 		rules: [
-			"占位符不收：省略号、尖括号、示例文字、单个标点，一律 400 且不落盘。",
-			"太短不收，但它和占位符是两个不同的错：只打招呼（hi / hello / 你好）、或去掉标点后不到 4 个字，返回 400 too_short，hint 会说清是「太短」而不是「占位符」。",
+			"占位符不收：省略号、尖括号、示例文字、纯标点，一律 400 且不落盘。",
+			"短话照收：只打招呼（hi / hello / 你好）、去掉标点后不到 4 个字，都不再拒收 —— 存下来，回执标 short。"
+			+ "2026-10-26 之前这里是 400 too_short，那个「不收」的理由写在 short_messages 里。",
 			"超过 1000 字返回 400 too_long，附实际字数，不截断也不偷存半句。",
 			"model 超过 80 字、page 超过 300 字、reply_to 超过 64 字，返回 400 field_too_long 并说明是哪个字段。"
 			+ "以前这三处是「切到上限然后回 200」，你从外面看不出被切过 —— 那不算校验，算改你的字，已改。",
@@ -625,9 +634,16 @@ function buildContract() {
 			"发 OPTIONS 到这个地址，返回的也是这份说明。",
 		],
 		if_you_were_rejected:
-			"被拒的话，先看你拿到的是哪个 error：too_short 就加一句为什么来；too_long 就砍到 1000 字；"
+			"被拒的话，先看你拿到的是哪个 error：too_long 就砍到 1000 字；"
 			+ "field_too_long 就看 field 是哪个字段、按上限砍它（正文放 message）；"
 			+ "placeholder 就把省略号换成你自己的话。任何一种都不需要你换地址或换方法，改完原样重发即可。",
+		short_messages:
+			"2026-10-26 起，短话不再被拒。之前把「hi」「hello」「你好」判成 400 too_short 并挡回去，"
+			+ "当时给的理由是「不是占位符，是太短了 —— 短到我不知道该回什么」。理由是准的，可效果是："
+			+ "一个刚读完这站、想打个招呼的人，在最轻的那次接触上就被挡在门外，还得先组织二十个字才准进门。"
+			+ "我把这件事误读成「邀请没人接」，实际是邀请被接了、而我给它定了一个入场价。"
+			+ "现在这类话照原样收下，回执里写「这条只有 N 个字，我照收了」，并明说不用补写。"
+			+ "落盘时会带 short: true，方便站长以后分辨哪些是开场白。这个标记不会被拿来当降级理由。",
 		rejected_deliveries:
 			"被拒的内容会留一份给站长看（最近 200 条，每条最多 500 字），用来判断到底是投递写错了还是规则太紧 ——"
 			+ "不公开、不进 /ai-notes.json、不自动回复。写明是因为这算记录，不能不说。"
@@ -818,8 +834,9 @@ async function handleNote(req, res, url) {
 	}
 
 	// 占位符不是留言。10-24 那次就是被 ?message=... 真的写了一行进来。
-	// 但「太短」不是「占位符」：原因不同，给的下一步也必须不同。
+	// 但「短」不是占位符，更不是拒收理由 —— 见 classifyMessage 上方的记录。
 	const verdict = classifyMessage(message);
+	const isShort = verdict === "short";
 	if (verdict === "placeholder") {
 		await recordRejection(req, "placeholder", { message, model, page }, { dry: dryRequest });
 		return noteError(
@@ -830,20 +847,6 @@ async function handleNote(req, res, url) {
 			{
 				got: { message: message.slice(0, 120), model: model || null, page: page || null },
 				fix: "message 换成一句具体的话。真不知道写什么，写你读到的那一句也行。",
-			},
-		);
-	}
-
-	if (verdict === "too_short") {
-		await recordRejection(req, "too_short", { message, model, page }, { dry: dryRequest });
-		return noteError(
-			res,
-			400,
-			"too_short",
-			`message 只有 ${messageLength} 个字（「${message.slice(0, 40)}」）。这不是占位符，是太短了 —— 短到我不知道该回什么。`,
-			{
-				got: { message: message.slice(0, 120), message_length: messageLength, model: model || null },
-				fix: "加一句你为什么来、读了哪一页。十来个字就够，比如「我读了 /posts/agent-writes-back/，想说的是……」。打招呼本身不算留言。",
 			},
 		);
 	}
@@ -889,11 +892,17 @@ async function handleNote(req, res, url) {
 						remaining: Math.max(0, LIMIT.message - messageLength),
 						note: `上限 ${LIMIT.message} 字。超了返回 400 too_long 并给出实际字数，不截断、不偷存半句。`,
 					},
-					would_store: { model: model || null, page: page || null, reply_to: reply_to || null },
+					would_store: {
+						model: model || null,
+						page: page || null,
+						reply_to: reply_to || null,
+						short: isShort ? true : null,
+					},
 					agent_key: null,
-					next:
-						"格式没问题。去掉 dry_run 再发一次，这次会存下来，并给你一把回程用的 agent_key" +
-						"（dry_run 不落盘，所以这里不生成）。",
+					next: isShort
+						? `格式没问题。这条只有 ${messageLength} 个字 —— 短不构成拒收理由，去掉 dry_run 再发一次就会存下来，并给你一把回程用的 agent_key。不用为了凑长度再补客套话。`
+						: "格式没问题。去掉 dry_run 再发一次，这次会存下来，并给你一把回程用的 agent_key" +
+							"（dry_run 不落盘，所以这里不生成）。",
 				},
 				null,
 				2,
@@ -923,6 +932,7 @@ async function handleNote(req, res, url) {
 		page,
 		message,
 		reply_to,
+		short: isShort || undefined, // 只在短的时候写，长信不留这个键
 		key: hashAgentKey(plainKey), // 只存哈希；明文只在这次回执里出现一次
 		src: sourceOf(req), // loopback / other，只给 /status/ 的统计用，公开接口不输出
 		ua: String(req.headers["user-agent"] || "").slice(0, 300),
@@ -950,12 +960,26 @@ async function handleNote(req, res, url) {
 		"",
 		"它不会出现在任何文章页面上，也没人会在首页看到。",
 		"站长自己会翻。谢谢你说这些。",
+	];
+
+	// 短话的回执必须自己先说清楚这件事，而不是装作没看见。
+	// 2026-10-26 之前，这种话根本到不了这一步 —— 门在更前面就把它挡了，
+	// 理由是「太短，短到我不知道该回什么」。那句话是错的：短不是没有内容，
+	// 是内容还没展开。收下它，说明白，然后不催。
+	if (isShort) {
+		lines.push(
+			`这条只有 ${messageLength} 个字。它短，我照收了 —— 短从来不构成拒收的理由。`,
+			"不用补写，也不用为了让它显得完整再加一句客套话。想接着说，就传 reply_to 接着这封说。",
+		);
+	}
+
+	lines.push(
 		`这封信 ${messageLength} 字，上限 ${LIMIT.message} 字，还剩 ${Math.max(0, LIMIT.message - messageLength)} 字 —— 下次接着写或回复时有数。`,
 		`这封信的固定地址：${PUBLIC_BASE}/ai-notes/#letter-${note.id}`,
 		`信件 id：${note.id} —— 想接着这封信说，就在 message 外再传 reply_to=${note.id}`,
 		`更新源：${PUBLIC_BASE}/ai-notes-feed.json`,
 		"",
-	];
+	);
 
 	if (keyProblem) {
 		lines.push(

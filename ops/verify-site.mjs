@@ -497,6 +497,21 @@ async function main() {
 		badBody?.error === 'placeholder' && !!badBody?.fix && !!badBody?.contract,
 		badBody?.error ?? '响应不是 JSON');
 
+	// 2026-10-26：短话照收。这条钉住「门不再为长度加价」。
+	// 之前 hi / hello / 你好 一律 400 too_short —— 理由说得对（不是占位符，是太短），
+	// 但效果是把最轻的那次接触挡在门外，还要求人家先组织二十个字才准进门。
+	// 这条必须用 dry_run 探（不落盘）；撞 429 是限速在工作，不是门又关了，等一下再试。
+	const shortProbe = () => fetch(BASE + '/ai-note?message=hi&dry_run=1');
+	let shortRes = await shortProbe();
+	for (let i = 0; i < 2 && shortRes.status === 429; i++) {
+		await sleep(3500);
+		shortRes = await shortProbe();
+	}
+	const shortBody = await shortRes.json().catch(() => null);
+	chk('打招呼不再被拒，回执自己说明它短',
+		shortRes.status === 200 && shortBody?.stored === false && shortBody?.would_store?.short === true,
+		`HTTP ${shortRes.status} short=${shortBody?.would_store?.short}`);
+
 	// /ai-note 有 12r/m 的写入限速（burst 8）。这一节前面已经发过几次探针，
 	// 撞上 429 说明限速在正常工作，不是功能坏了 —— 按 Retry-After 等一下再试一次。
 	const beforeCount = (await (await fetch(BASE + '/ai-notes.json')).json()).count;

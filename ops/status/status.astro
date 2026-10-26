@@ -631,6 +631,24 @@ const pageDescription =
 						if (am.not_caused_by_this_fix) box.append(mk("p", "exp__meta", "别归错因：" + am.not_caused_by_this_fix));
 						if (am.conclusion_changed === false && am.why_not) box.append(mk("p", "exp__meta", "结论没变：" + am.why_not));
 						if (am.what_did_not_change) box.append(mk("p", "exp__meta", "没动的：" + am.what_did_not_change));
+						// 兜底：改动记录里凡是上面没点名的字段，一律照样印出来。
+						// 原因很具体：我加过 scope_of_the_change / not_retroactive /
+						// a_thing_i_cannot_classify 三个键，页面一声不响地把它们丢了 ——
+						// 我写了字，读者看不到，和 model 被悄悄截到 80 字是同一类毛病。
+						const KNOWN = new Set([
+							"at", "what", "why", "numbers_before_after", "not_caused_by_this_fix",
+							"conclusion_changed", "why_not", "what_did_not_change",
+						]);
+						const LABEL = {
+							scope_of_the_change: "改到哪一步：",
+							not_retroactive: "追不追溯：",
+							a_thing_i_cannot_classify: "我判不了的一处：",
+							numbers_live_where: "实时数字在哪：",
+						};
+						for (const [k, val] of Object.entries(am)) {
+							if (KNOWN.has(k) || val === null || val === undefined || val === "") continue;
+							box.append(mk("p", "exp__meta", (LABEL[k] || k + "：") + String(val)));
+						}
 						wrap.append(box);
 					}
 					det.append(wrap);
